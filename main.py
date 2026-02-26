@@ -45,22 +45,9 @@ def nitter_to_twitter(url: str) -> str:
 
 def send_to_discord(entry) -> None:
     twitter_url = nitter_to_twitter(entry.link)
-    author      = entry.get("author", "Unknown")
-    title       = entry.get("title", "")
-
-    payload = {
-        "embeds": [{
-            "color": 0x1DA1F2,
-            "author": {
-                "name": f"{author} posted on X",
-                "icon_url": "https://abs.twimg.com/favicons/twitter.3.ico",
-            },
-            "description": title,
-            "url": twitter_url,
-            "footer": {"text": twitter_url},
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }]
-    }
+    # Send only the raw Twitter URL as the message content so that
+    # Discord can generate its own native embed for the tweet.
+    payload = {"content": twitter_url}
 
     r = requests.post(DISCORD_WEBHOOK_URL, json=payload)
     if r.status_code in (200, 204):
