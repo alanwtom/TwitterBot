@@ -9,7 +9,6 @@ Requirements:
 
 """
 
-
 import time
 import json
 import os
@@ -17,14 +16,33 @@ import requests
 import tweepy
 from datetime import datetime, timezone
 
+
+def load_env_file(path: str = ".env") -> None:
+    """Load KEY=VALUE pairs from a local .env file into os.environ."""
+    if not os.path.exists(path):
+        return
+
+    with open(path) as env_file:
+        for raw_line in env_file:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            os.environ.setdefault(key, value)
+
 # ──────────────────────────────────────────────────────────────
-# CONFIG  ← fill these in
+# CONFIG  ← set these in .env
 # ──────────────────────────────────────────────────────────────
-TWITTER_BEARER_TOKEN = "AAAAAAAAAAAAAAAAAAAAAA2E7wEAAAAA43LALFf9hYjiORZyiVufU6u%2FSEA%3DCC3IXtsHiiu8xrKzeeFWjxAwOs8ozhbJhBGjCi5KZdUBADmQWq"
-DISCORD_WEBHOOK_URL  = "https://discord.com/api/webhooks/1476589083756068956/vsq6m_xET2zs43RTOy_hqAvNPQpK1qiQZWTR3SXehvHcciKPZBxDQd9G-gHK6ntGQcZt"
-TWITTER_USERNAME     = "aleabitoreddit"          # account to watch (no @)
-POLL_INTERVAL        = 60                  # seconds between checks
-LAST_TWEET_FILE      = "last_tweet_id.txt" # persists the last seen tweet
+load_env_file()
+
+TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN", "")
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
+TWITTER_USERNAME = os.getenv("TWITTER_USERNAME", "")  # account to watch (no @)
+POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "60"))  # seconds between checks
+LAST_TWEET_FILE = os.getenv("LAST_TWEET_FILE", "last_tweet_id.txt")  # persistence
 # ──────────────────────────────────────────────────────────────
 
 
@@ -96,6 +114,12 @@ def fetch_new_tweets(client: tweepy.Client, user_id: str, since_id: str | None):
 
 
 def main():
+    if not TWITTER_BEARER_TOKEN or not DISCORD_WEBHOOK_URL or not TWITTER_USERNAME:
+        raise ValueError(
+            "Missing required config. Set TWITTER_BEARER_TOKEN, "
+            "DISCORD_WEBHOOK_URL, and TWITTER_USERNAME in .env."
+        )
+
     print(f"Starting Twitter → Discord notifier for @{TWITTER_USERNAME}")
     print(f"Polling every {POLL_INTERVAL}s  |  Ctrl-C to stop\n")
 
