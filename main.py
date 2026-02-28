@@ -21,6 +21,7 @@ from pathlib import Path
 import discord
 from discord.ext import tasks
 from google import genai
+from google.genai import types
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -108,7 +109,7 @@ def analyze_sentiment(entry) -> dict | None:
         response = client.models.generate_content(
             model=GEMINI_MODEL,
             contents=prompt,
-            config=genai.GenerateContentConfig(
+            config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 temperature=0.1,
             )
