@@ -33,7 +33,7 @@ NITTER_RSS_URL = os.environ.get("NITTER_RSS_URL", "https://nitter.net/aleabitore
 DISCORD_BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 DISCORD_CHANNEL_ID = int(os.environ["DISCORD_CHANNEL_ID"])
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-exp")
 
 POLL_INTERVAL = 120  # seconds between checks
 # Use /data on Railway for persistent storage across restarts
