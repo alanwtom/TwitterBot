@@ -17,6 +17,7 @@ import os
 import time
 import feedparser
 from datetime import datetime
+from pathlib import Path
 
 import discord
 from discord.ext import tasks
@@ -36,7 +37,8 @@ GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash-exp")
 
 POLL_INTERVAL = 120  # seconds between checks
-LAST_TWEET_FILE = "/tmp/last_tweet_id.txt"
+# Use /data on Railway for persistent storage across restarts
+LAST_TWEET_FILE = os.environ.get("LAST_TWEET_FILE", "/data/last_tweet_id.txt")
 SENTIMENT_ENABLED = os.environ.get("SENTIMENT_ENABLED", "true").lower() == "true"
 # ──────────────────────────────────────────────────────────────
 
@@ -52,6 +54,8 @@ def load_last_id() -> str | None:
 
 def save_last_id(tweet_id: str) -> None:
     """Save the last processed tweet ID to disk."""
+    # Ensure directory exists
+    Path(LAST_TWEET_FILE).parent.mkdir(parents=True, exist_ok=True)
     with open(LAST_TWEET_FILE, "w") as f:
         f.write(tweet_id)
 
