@@ -7,7 +7,7 @@ and creates threaded replies with AI-powered financial sentiment analysis.
 Requirements (requirements.txt):
     feedparser
     requests
-    google-genai>=1.0.0
+    groq>=0.11.0
     discord.py>=2.3.0
     python-dotenv>=1.0.0
 """
@@ -21,8 +21,7 @@ from pathlib import Path
 
 import discord
 from discord.ext import tasks
-from google import genai
-from google.genai import types
+from groq import Groq
 from dotenv import load_dotenv
 
 # Set user agent for Nitter (some instances block default user agent)
@@ -37,8 +36,8 @@ load_dotenv()
 NITTER_RSS_URL = os.environ.get("NITTER_RSS_URL", "https://nitter.net/aleabitoreddit/rss")
 DISCORD_BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 DISCORD_CHANNEL_ID = int(os.environ["DISCORD_CHANNEL_ID"])
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+GROQ_API_KEY = os.environ["GROQ_API_KEY"]
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 POLL_INTERVAL = 120  # seconds between checks
 # Use /data on Railway for persistent storage across restarts
@@ -71,7 +70,7 @@ def nitter_to_twitter(url: str) -> str:
 
 
 # ──────────────────────────────────────────────────────────────
-# GEMINI SENTIMENT ANALYSIS
+# GROQ SENTIMENT ANALYSIS
 # ──────────────────────────────────────────────────────────────
 
 SENTIMENT_PROMPT = """You are a financial sentiment analyst. Analyze this tweet and extract:
@@ -97,12 +96,12 @@ Return valid JSON only:
 
 def analyze_sentiment(entry) -> dict | None:
     """
-    Analyze a tweet's financial sentiment using Google Gemini.
+    Analyze a tweet's financial sentiment using Groq.
 
     Returns a dict with tickers, sentiment, bull_case, bear_case, and summary,
     or None if analysis fails.
     """
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    client = Groq(api_key=GROQ_API_KEY)
 
     content = entry.get('summary', entry.get('title', ''))
     author = entry.get('author', 'Unknown')
@@ -110,17 +109,18 @@ def analyze_sentiment(entry) -> dict | None:
     prompt = SENTIMENT_PROMPT.format(author=author, content=content)
 
     try:
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.1,
-            )
+        response = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": "You are a financial sentiment analyst. Always respond with valid JSON only."},
+                {"role": "user", "content": prompt}
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.1,
         )
-        return json.loads(response.text)
+        return json.loads(response.choices[0].message.content)
     except Exception as e:
-        print(f"[!] Gemini error: {e}")
+        print(f"[!] Groq error: {e}")
         return None
 
 
@@ -169,7 +169,7 @@ def create_analysis_embed(analysis: dict) -> discord.Embed:
         embed.add_field(name="📝 Summary", value=summary, inline=False)
 
     # Add footer and timestamp
-    embed.set_footer(text="AI-powered sentiment analysis • Gemini 2.5 Flash")
+    embed.set_footer(text="AI-powered sentiment analysis • Llama 3.3 70B on Groq")
     embed.timestamp = datetime.now()
 
     return embed
@@ -279,8 +279,8 @@ def main():
     if not DISCORD_CHANNEL_ID:
         print("[!] DISCORD_CHANNEL_ID not set in environment")
         return
-    if not GEMINI_API_KEY:
-        print("[!] GEMINI_API_KEY not set in environment")
+    if not GROQ_API_KEY:
+        print("[!] GROQ_API_KEY not set in environment")
         return
 
     client.run(DISCORD_BOT_TOKEN)
