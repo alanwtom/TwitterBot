@@ -167,9 +167,9 @@ def create_analysis_embed(analysis: dict) -> discord.Embed:
     if summary:
         embed.add_field(name="📝 Summary", value=summary, inline=False)
 
-    # Add footer
+    # Add footer and timestamp
     embed.set_footer(text="AI-powered sentiment analysis • Gemini 2.5 Flash")
-    embed.set_timestamp()
+    embed.timestamp = datetime.now()
 
     return embed
 
