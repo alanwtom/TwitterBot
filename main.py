@@ -22,6 +22,10 @@ import discord
 from discord.ext import tasks
 from zhipuai import ZhipuAI
 from dotenv import load_dotenv
+import urllib.request
+
+# Set user agent for Nitter (some instances block default user agent)
+feedparser.USER_AGENT = "Mozilla/5.0 (compatible; TwitterBot/1.0; +https://github.com/alanwtom/TwitterBot)"
 
 # Load environment variables from .env file
 load_dotenv()
