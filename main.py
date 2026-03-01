@@ -124,7 +124,7 @@ def analyze_sentiment(entry) -> dict | None:
 
 
 def format_analysis(analysis: dict) -> str:
-    """Format the sentiment analysis for Discord display."""
+    """Format the sentiment analysis for Discord display (max 2000 chars)."""
     lines = ["**Sentiment Analysis**\n"]
 
     if analysis.get("tickers"):
@@ -135,14 +135,24 @@ def format_analysis(analysis: dict) -> str:
     emoji = {"BUY": "🟢", "SELL": "🔴", "NEUTRAL": "⚪"}.get(sentiment, "⚪")
     lines.append(f"**Signal:** {emoji} {sentiment}\n")
 
+    # Truncate long fields to stay under Discord's 2000 char limit
     if analysis.get("bull_case"):
-        lines.append(f"**Bull:** {analysis['bull_case']}\n")
-    if analysis.get("bear_case"):
-        lines.append(f"**Bear:** {analysis['bear_case']}\n")
-    if analysis.get("summary"):
-        lines.append(f"**Summary:** {analysis['summary']}")
+        bull = analysis['bull_case'][:300] + "..." if len(analysis['bull_case']) > 300 else analysis['bull_case']
+        lines.append(f"**Bull:** {bull}\n")
 
-    return "".join(lines)
+    if analysis.get("bear_case"):
+        bear = analysis['bear_case'][:300] + "..." if len(analysis['bear_case']) > 300 else analysis['bear_case']
+        lines.append(f"**Bear:** {bear}\n")
+
+    if analysis.get("summary"):
+        summary = analysis['summary'][:500] + "..." if len(analysis['summary']) > 500 else analysis['summary']
+        lines.append(f"**Summary:** {summary}")
+
+    result = "".join(lines)
+    # Final safety check - truncate if still too long
+    if len(result) > 1950:
+        result = result[:1950] + "..."
+    return result
 
 
 # ──────────────────────────────────────────────────────────────
