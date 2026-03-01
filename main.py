@@ -7,7 +7,7 @@ and creates threaded replies with AI-powered financial sentiment analysis.
 Requirements (requirements.txt):
     feedparser
     requests
-    google-generativeai>=0.8.0
+    google-genai>=1.0.0
     discord.py>=2.3.0
     python-dotenv>=1.0.0
 """
@@ -20,7 +20,8 @@ from pathlib import Path
 
 import discord
 from discord.ext import tasks
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from dotenv import load_dotenv
 
 # Set user agent for Nitter (some instances block default user agent)
@@ -100,14 +101,7 @@ def analyze_sentiment(entry) -> dict | None:
     Returns a dict with tickers, sentiment, bull_case, bear_case, and summary,
     or None if analysis fails.
     """
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel(
-        GEMINI_MODEL,
-        generation_config=genai.GenerationConfig(
-            response_mime_type="application/json",
-            temperature=0.1,
-        )
-    )
+    client = genai.Client(api_key=GEMINI_API_KEY)
 
     content = entry.get('summary', entry.get('title', ''))
     author = entry.get('author', 'Unknown')
@@ -115,7 +109,14 @@ def analyze_sentiment(entry) -> dict | None:
     prompt = SENTIMENT_PROMPT.format(author=author, content=content)
 
     try:
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.1,
+            )
+        )
         return json.loads(response.text)
     except Exception as e:
         print(f"[!] Gemini error: {e}")
