@@ -7,7 +7,7 @@ and creates threaded replies with AI-powered financial sentiment analysis.
 Requirements (requirements.txt):
     feedparser
     requests
-    google-genai>=1.0.0
+    google-generativeai>=0.8.0
     discord.py>=2.3.0
     python-dotenv>=1.0.0
 """
@@ -20,8 +20,7 @@ from pathlib import Path
 
 import discord
 from discord.ext import tasks
-from google import genai
-from google.genai import types
+import google.generativeai as genai
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -34,7 +33,7 @@ NITTER_RSS_URL = os.environ.get("NITTER_RSS_URL", "https://nitter.net/aleabitore
 DISCORD_BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 DISCORD_CHANNEL_ID = int(os.environ["DISCORD_CHANNEL_ID"])
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-exp")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 
 POLL_INTERVAL = 120  # seconds between checks
 # Use /data on Railway for persistent storage across restarts
@@ -98,7 +97,15 @@ def analyze_sentiment(entry) -> dict | None:
     Returns a dict with tickers, sentiment, bull_case, bear_case, and summary,
     or None if analysis fails.
     """
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    genai.configure(api_key=GEMINI_API_KEY)
+
+    model = genai.GenerativeModel(
+        model_name=GEMINI_MODEL,
+        generation_config=genai.GenerationConfig(
+            response_mime_type="application/json",
+            temperature=0.1,
+        )
+    )
 
     content = entry.get('summary', entry.get('title', ''))
     author = entry.get('author', 'Unknown')
@@ -106,14 +113,7 @@ def analyze_sentiment(entry) -> dict | None:
     prompt = SENTIMENT_PROMPT.format(author=author, content=content)
 
     try:
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.1,
-            )
-        )
+        response = model.generate_content(prompt)
         return json.loads(response.text)
     except Exception as e:
         print(f"[!] Gemini error: {e}")
