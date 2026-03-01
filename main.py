@@ -76,9 +76,9 @@ def nitter_to_twitter(url: str) -> str:
 SENTIMENT_PROMPT = """You are a financial sentiment analyst. Analyze this tweet and extract:
 1. Tickers/symbols mentioned (crypto: $BTC, $ETH; stocks: NVDA, AAPL)
 2. Sentiment: BUY, SELL, or NEUTRAL
-3. Bull case (reasons to be long)
-4. Bear case (reasons to be short/avoid)
-5. Brief summary
+3. Bull case (2-3 bullet points max, reasons to be long)
+4. Bear case (2-3 bullet points max, reasons to be short/avoid)
+5. One-sentence summary
 
 Author: {author}
 Content: {content}
@@ -87,9 +87,9 @@ Return valid JSON only:
 {{
     "tickers": ["BTC", "ETH"],
     "sentiment": "BUY",
-    "bull_case": "...",
-    "bear_case": "...",
-    "summary": "..."
+    "bull_case": "• Strong momentum\\n• Positive catalysts",
+    "bear_case": "• Overbought conditions\\n• Risk of reversal",
+    "summary": "One sentence summary here."
 }}
 """
 
@@ -123,36 +123,55 @@ def analyze_sentiment(entry) -> dict | None:
         return None
 
 
-def format_analysis(analysis: dict) -> str:
-    """Format the sentiment analysis for Discord display (max 2000 chars)."""
-    lines = ["**Sentiment Analysis**\n"]
+def create_analysis_embed(analysis: dict) -> discord.Embed:
+    """Create a Discord Embed for sentiment analysis."""
+    sentiment = analysis.get("sentiment", "NEUTRAL").upper()
 
-    if analysis.get("tickers"):
-        tickers = " ".join(f"${t}" if not t.startswith("$") else t for t in analysis["tickers"])
-        lines.append(f"**Tickers:** {tickers}\n")
+    # Color based on sentiment
+    colors = {
+        "BUY": 0x57F287,      # Discord green
+        "SELL": 0xED4245,     # Discord red
+        "NEUTRAL": 0x5865F2,  # Discord blurple
+    }
+    color = colors.get(sentiment, 0x5865F2)
 
-    sentiment = analysis.get("sentiment", "NEUTRAL")
-    emoji = {"BUY": "🟢", "SELL": "🔴", "NEUTRAL": "⚪"}.get(sentiment, "⚪")
-    lines.append(f"**Signal:** {emoji} {sentiment}\n")
+    # Emoji for signal
+    emojis = {"BUY": "🟢", "SELL": "🔴", "NEUTRAL": "⚪"}
+    signal_emoji = emojis.get(sentiment, "⚪")
 
-    # Truncate long fields to stay under Discord's 2000 char limit
-    if analysis.get("bull_case"):
-        bull = analysis['bull_case'][:300] + "..." if len(analysis['bull_case']) > 300 else analysis['bull_case']
-        lines.append(f"**Bull:** {bull}\n")
+    # Format tickers
+    tickers = analysis.get("tickers", [])
+    if tickers:
+        ticker_display = " ".join(f"`${t}`" if not t.startswith("$") else f"`{t}`" for t in tickers[:5])
+    else:
+        ticker_display = "None detected"
 
-    if analysis.get("bear_case"):
-        bear = analysis['bear_case'][:300] + "..." if len(analysis['bear_case']) > 300 else analysis['bear_case']
-        lines.append(f"**Bear:** {bear}\n")
+    # Truncate long fields
+    bull_case = analysis.get('bull_case', '')[:350] + "..." if len(analysis.get('bull_case', '')) > 350 else analysis.get('bull_case', '')
+    bear_case = analysis.get('bear_case', '')[:350] + "..." if len(analysis.get('bear_case', '')) > 350 else analysis.get('bear_case', '')
+    summary = analysis.get('summary', '')[:400] + "..." if len(analysis.get('summary', '')) > 400 else analysis.get('summary', '')
 
-    if analysis.get("summary"):
-        summary = analysis['summary'][:500] + "..." if len(analysis['summary']) > 500 else analysis['summary']
-        lines.append(f"**Summary:** {summary}")
+    embed = discord.Embed(
+        title=f"{signal_emoji} {sentiment} Signal",
+        description=f"**Tickers:** {ticker_display}",
+        color=color
+    )
 
-    result = "".join(lines)
-    # Final safety check - truncate if still too long
-    if len(result) > 1950:
-        result = result[:1950] + "..."
-    return result
+    # Add bullish and bearish cases as inline fields (side by side)
+    if bull_case:
+        embed.add_field(name="🐂 Bull Case", value=bull_case or "N/A", inline=False)
+    if bear_case:
+        embed.add_field(name="🐻 Bear Case", value=bear_case or "N/A", inline=False)
+
+    # Add summary
+    if summary:
+        embed.add_field(name="📝 Summary", value=summary, inline=False)
+
+    # Add footer
+    embed.set_footer(text="AI-powered sentiment analysis • Gemini 2.5 Flash")
+    embed.set_timestamp()
+
+    return embed
 
 
 # ──────────────────────────────────────────────────────────────
@@ -224,7 +243,8 @@ async def poll_feed():
                         name=f"{tickers_str} Analysis",
                         auto_archive_duration=1440  # 24 hours
                     )
-                    await thread.send(format_analysis(analysis))
+                    embed = create_analysis_embed(analysis)
+                    await thread.send(embed=embed)
                     print(f"[✓] Added analysis for {analysis['tickers']}")
 
         # Save the newest entry ID
