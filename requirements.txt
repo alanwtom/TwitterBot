@@ -1,6 +1,5 @@
 feedparser
 requests
-zhipuai>=2.0.0
-sniffio
+zai-sdk>=0.1.0
 discord.py>=2.3.0
 python-dotenv>=1.0.0

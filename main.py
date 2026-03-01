@@ -7,7 +7,7 @@ and creates threaded replies with AI-powered financial sentiment analysis.
 Requirements (requirements.txt):
     feedparser
     requests
-    zhipuai>=2.0.0
+    zai-sdk>=0.1.0
     discord.py>=2.3.0
     python-dotenv>=1.0.0
 """
@@ -20,9 +20,8 @@ from pathlib import Path
 
 import discord
 from discord.ext import tasks
-from zhipuai import ZhipuAI
+from zai import ZaiClient
 from dotenv import load_dotenv
-import urllib.request
 
 # Set user agent for Nitter (some instances block default user agent)
 feedparser.USER_AGENT = "Mozilla/5.0 (compatible; TwitterBot/1.0; +https://github.com/alanwtom/TwitterBot)"
@@ -37,7 +36,7 @@ NITTER_RSS_URL = os.environ.get("NITTER_RSS_URL", "https://nitter.net/aleabitore
 DISCORD_BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 DISCORD_CHANNEL_ID = int(os.environ["DISCORD_CHANNEL_ID"])
 GLM_API_KEY = os.environ["GLM_API_KEY"]
-GLM_MODEL = os.environ.get("GLM_MODEL", "glm-4-flash")
+GLM_MODEL = os.environ.get("GLM_MODEL", "glm-5")
 
 POLL_INTERVAL = 120  # seconds between checks
 # Use /data on Railway for persistent storage across restarts
@@ -96,12 +95,12 @@ Return valid JSON only:
 
 def analyze_sentiment(entry) -> dict | None:
     """
-    Analyze a tweet's financial sentiment using GLM AI.
+    Analyze a tweet's financial sentiment using Z.ai GLM.
 
     Returns a dict with tickers, sentiment, bull_case, bear_case, and summary,
     or None if analysis fails.
     """
-    client = ZhipuAI(api_key=GLM_API_KEY)
+    client = ZaiClient(api_key=GLM_API_KEY)
 
     content = entry.get('summary', entry.get('title', ''))
     author = entry.get('author', 'Unknown')
@@ -119,7 +118,7 @@ def analyze_sentiment(entry) -> dict | None:
         )
         return json.loads(response.choices[0].message.content)
     except Exception as e:
-        print(f"[!] GLM error: {e}")
+        print(f"[!] Z.ai error: {e}")
         return None
 
 
