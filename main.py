@@ -12,6 +12,7 @@ Requirements (requirements.txt):
     python-dotenv>=1.0.0
 """
 
+import asyncio
 import json
 import os
 import feedparser
@@ -187,9 +188,25 @@ async def on_ready():
     """Called when the bot successfully connects to Discord."""
     print(f"Logged in as {client.user}")
     print(f"Watching: {NITTER_RSS_URL}")
-    print(f"Polling every {POLL_INTERVAL}s — Ctrl-C to stop\n")
+    print(f"Polling every {POLL_INTERVAL}s\n")
+    # Wait a moment before starting polling loop
+    await asyncio.sleep(2)
     # Start the polling loop
     poll_feed.start()
+
+
+@client.event
+async def on_resumed():
+    """Called when the bot resumes a connection."""
+    print(f"[✓] Connection resumed")
+    if not poll_feed.is_running():
+        poll_feed.start()
+
+
+@client.event
+async def on_disconnect():
+    """Called when the bot disconnects."""
+    print(f"[!] Disconnected from Discord")
 
 
 @tasks.loop(seconds=POLL_INTERVAL)
