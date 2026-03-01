@@ -7,7 +7,7 @@ and creates threaded replies with AI-powered financial sentiment analysis.
 Requirements (requirements.txt):
     feedparser
     requests
-    zai-sdk>=0.1.0
+    google-generativeai>=0.8.0
     discord.py>=2.3.0
     python-dotenv>=1.0.0
 """
@@ -20,7 +20,7 @@ from pathlib import Path
 
 import discord
 from discord.ext import tasks
-from zai import ZaiClient
+import google.generativeai as genai
 from dotenv import load_dotenv
 
 # Set user agent for Nitter (some instances block default user agent)
@@ -35,8 +35,8 @@ load_dotenv()
 NITTER_RSS_URL = os.environ.get("NITTER_RSS_URL", "https://nitter.net/aleabitoreddit/rss")
 DISCORD_BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 DISCORD_CHANNEL_ID = int(os.environ["DISCORD_CHANNEL_ID"])
-GLM_API_KEY = os.environ["GLM_API_KEY"]
-GLM_MODEL = os.environ.get("GLM_MODEL", "glm-5")
+GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
 POLL_INTERVAL = 120  # seconds between checks
 # Use /data on Railway for persistent storage across restarts
@@ -69,7 +69,7 @@ def nitter_to_twitter(url: str) -> str:
 
 
 # ──────────────────────────────────────────────────────────────
-# GLM SENTIMENT ANALYSIS
+# GEMINI SENTIMENT ANALYSIS
 # ──────────────────────────────────────────────────────────────
 
 SENTIMENT_PROMPT = """You are a financial sentiment analyst. Analyze this tweet and extract:
@@ -95,12 +95,19 @@ Return valid JSON only:
 
 def analyze_sentiment(entry) -> dict | None:
     """
-    Analyze a tweet's financial sentiment using Z.ai GLM.
+    Analyze a tweet's financial sentiment using Google Gemini.
 
     Returns a dict with tickers, sentiment, bull_case, bear_case, and summary,
     or None if analysis fails.
     """
-    client = ZaiClient(api_key=GLM_API_KEY)
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel(
+        GEMINI_MODEL,
+        generation_config=genai.GenerationConfig(
+            response_mime_type="application/json",
+            temperature=0.1,
+        )
+    )
 
     content = entry.get('summary', entry.get('title', ''))
     author = entry.get('author', 'Unknown')
@@ -108,17 +115,10 @@ def analyze_sentiment(entry) -> dict | None:
     prompt = SENTIMENT_PROMPT.format(author=author, content=content)
 
     try:
-        response = client.chat.completions.create(
-            model=GLM_MODEL,
-            messages=[
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.1,
-            response_format={"type": "json_object"}
-        )
-        return json.loads(response.choices[0].message.content)
+        response = model.generate_content(prompt)
+        return json.loads(response.text)
     except Exception as e:
-        print(f"[!] Z.ai error: {e}")
+        print(f"[!] Gemini error: {e}")
         return None
 
 
@@ -231,8 +231,8 @@ def main():
     if not DISCORD_CHANNEL_ID:
         print("[!] DISCORD_CHANNEL_ID not set in environment")
         return
-    if not GLM_API_KEY:
-        print("[!] GLM_API_KEY not set in environment")
+    if not GEMINI_API_KEY:
+        print("[!] GEMINI_API_KEY not set in environment")
         return
 
     client.run(DISCORD_BOT_TOKEN)
