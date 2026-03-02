@@ -21,12 +21,14 @@ import feedparser
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
+from html import unescape
 
 import discord
 from discord.ext import tasks
 from groq import Groq
 from dotenv import load_dotenv
-from ntscraper import Nitter
+import requests
+from bs4 import BeautifulSoup
 
 # Set user agent for Nitter (some instances block default user agent)
 feedparser.USER_AGENT = "Mozilla/5.0 (compatible; TwitterBot/1.0; +https://github.com/alanwtom/TwitterBot)"
@@ -336,10 +338,147 @@ def extract_tweet_id(url: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _fetch_nitter_html(url: str) -> str | None:
+    """Fetch HTML from a Nitter instance."""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (compatible; TwitterBot/1.0; +https://github.com/alanwtom/TwitterBot)'
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            return response.text
+    except Exception as e:
+        print(f"[!] Request failed: {e}")
+    return None
+
+
+def _parse_thread_tweets(html: str, tweet_url: str) -> list[dict]:
+    """Parse thread tweets from Nitter HTML."""
+    if not html:
+        return []
+
+    soup = BeautifulSoup(html, 'html.parser')
+    tweets = []
+
+    # Try multiple selectors for different Nitter versions
+    tweet_items = (
+        soup.find_all('div', class_='timeline-item') or
+        soup.find_all('div', class_='tweet') or
+        soup.find_all('article') or
+        []
+    )
+
+    print(f"[*] Found {len(tweet_items)} potential tweet items")
+
+    for item in tweet_items[:MAX_THREAD_TWEETS]:
+        try:
+            # Extract tweet text - try multiple selectors
+            text_elem = (
+                item.find('div', class_='tweet-content') or
+                item.find('div', class_='tweet-text') or
+                item.find('p', class_='tweet-text')
+            )
+            text = unescape(text_elem.get_text()) if text_elem else ""
+
+            # Extract username - try multiple selectors
+            username_elem = item.find('a', class_='username')
+            username = username_elem.get_text().strip('@') if username_elem else ""
+            if not username:
+                # Try alternative selector
+                username_elem = item.find('span', class_='username')
+                username = username_elem.get_text().strip('@') if username_elem else ""
+
+            # Extract tweet ID from link
+            tweet_id = ""
+            link_elem = item.find('a', class_='tweet-link')
+            if link_elem and link_elem.get('href'):
+                id_match = re.search(r'/status/(\w+)', link_elem.get('href', ''))
+                if id_match:
+                    tweet_id = id_match.group(1)
+
+            # Only add if we have meaningful content
+            if text and len(text.strip()) > 5:
+                tweets.append({
+                    'text': text.strip(),
+                    'author': username,
+                    'id': tweet_id,
+                    'is_thread': True
+                })
+        except Exception as e:
+            print(f"[!] Error parsing tweet: {e}")
+            continue
+
+    print(f"[✓] Parsed {len(tweets)} thread tweets")
+    return tweets
+
+
+def _parse_replies(html: str, tweet_url: str) -> list[dict]:
+    """Parse replies from Nitter HTML."""
+    if not html:
+        return []
+
+    soup = BeautifulSoup(html, 'html.parser')
+    replies = []
+
+    # Try multiple selectors for different Nitter versions
+    tweet_items = (
+        soup.find_all('div', class_='timeline-item') or
+        soup.find_all('div', class_='tweet') or
+        soup.find_all('article') or
+        []
+    )
+
+    for item in tweet_items:
+        try:
+            # Check if this is a reply (has "Replying to" text)
+            replying_elem = item.find('div', class_='replying-to')
+            is_reply = replying_elem is not None
+
+            # Alternative: check if tweet has a reply icon indicator
+            if not is_reply:
+                icon_div = item.find('div', class_='tweet-icon')
+                if icon_div and 'reply' in str(icon_div).lower():
+                    is_reply = True
+
+            # Skip if not a reply
+            if not is_reply:
+                continue
+
+            # Extract tweet text
+            text_elem = (
+                item.find('div', class_='tweet-content') or
+                item.find('div', class_='tweet-text')
+            )
+            text = unescape(text_elem.get_text()) if text_elem else ""
+
+            # Extract username
+            username_elem = item.find('a', class_='username')
+            username = username_elem.get_text().strip('@') if username_elem else ""
+
+            # Extract tweet ID from link
+            tweet_id = ""
+            link_elem = item.find('a', class_='tweet-link')
+            if link_elem and link_elem.get('href'):
+                id_match = re.search(r'/status/(\w+)', link_elem.get('href', ''))
+                if id_match:
+                    tweet_id = id_match.group(1)
+
+            if text and len(text.strip()) > 5:
+                replies.append({
+                    'text': text.strip(),
+                    'author': username,
+                    'id': tweet_id,
+                    'is_reply': True
+                })
+        except Exception as e:
+            continue
+
+    print(f"[✓] Parsed {len(replies)} replies")
+    return replies[:MAX_REPLIES]
+
+
 def _get_thread_tweets_sync(tweet_url: str) -> list[dict]:
-    """
-    Synchronous helper to fetch thread tweets.
-    """
+    """Synchronous helper to fetch thread tweets from Nitter."""
     if not THREAD_ANALYSIS_ENABLED:
         return []
 
@@ -348,58 +487,37 @@ def _get_thread_tweets_sync(tweet_url: str) -> list[dict]:
         print(f"[!] Could not extract tweet ID from {tweet_url}")
         return []
 
-    try:
-        # Use ntscraper with multiple Nitter instances
-        scraper = Nitter(log_level=0, skip_instance_check=False)
+    # Try to find the username from the URL
+    username_match = re.search(r'(?:twitter\.com|nitter\.\w+)/([^/]+)/status', tweet_url)
+    if not username_match:
+        # Use default username
+        username = DEFAULT_USERNAME
+    else:
+        username = username_match.group(1)
 
-        # Try each Nitter instance
-        for instance in NITTER_INSTANCES:
-            try:
-                print(f"[*] Fetching thread from {instance}...")
-                tweets = scraper.get_tweets(
-                    tweet_id,
-                    mode='thread',
-                    instance=f'https://{instance}'
-                )
+    for instance in NITTER_INSTANCES:
+        try:
+            # Construct Nitter URL for the tweet
+            nitter_url = f"https://{instance}/{username}/status/{tweet_id}"
+            print(f"[*] Fetching thread from {instance}...")
 
-                if tweets and 'tweets' in tweets and tweets['tweets']:
-                    thread_tweets = tweets['tweets'][:MAX_THREAD_TWEETS]
-                    print(f"[✓] Fetched {len(thread_tweets)} thread tweets from {instance}")
-                    return [
-                        {
-                            'text': t.get('text', ''),
-                            'author': t.get('user', {}).get('username', ''),
-                            'id': t.get('link', ''),
-                            'is_thread': True
-                        }
-                        for t in thread_tweets
-                    ]
-            except Exception as e:
-                print(f"[!] Instance {instance} failed for thread: {e}")
-                continue
+            html = _fetch_nitter_html(nitter_url)
+            if html:
+                tweets = _parse_thread_tweets(html, tweet_url)
+                if tweets:
+                    print(f"[✓] Fetched {len(tweets)} thread tweets from {instance}")
+                    return tweets
 
-        print(f"[!] All instances failed for thread fetch")
-        return []
-    except Exception as e:
-        print(f"[!] Thread fetch error: {e}")
-        return []
+        except Exception as e:
+            print(f"[!] Instance {instance} failed for thread: {e}")
+            continue
 
-
-async def get_thread_tweets(tweet_url: str) -> list[dict]:
-    """
-    Fetch all tweets in the thread using ntscraper.
-
-    Returns list of tweet dicts with 'text', 'author', 'id' keys.
-    Returns empty list if fetching fails.
-    """
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _get_thread_tweets_sync, tweet_url)
+    print(f"[!] All instances failed for thread fetch")
+    return []
 
 
 def _get_replies_sync(tweet_url: str) -> list[dict]:
-    """
-    Synchronous helper to fetch replies.
-    """
+    """Synchronous helper to fetch replies from Nitter."""
     if not REPLY_ANALYSIS_ENABLED:
         return []
 
@@ -407,52 +525,39 @@ def _get_replies_sync(tweet_url: str) -> list[dict]:
     if not tweet_id:
         return []
 
-    try:
-        scraper = Nitter(log_level=0, skip_instance_check=False)
+    username_match = re.search(r'(?:twitter\.com|nitter\.\w+)/([^/]+)/status', tweet_url)
+    if not username_match:
+        username = DEFAULT_USERNAME
+    else:
+        username = username_match.group(1)
 
-        for instance in NITTER_INSTANCES:
-            try:
-                print(f"[*] Fetching replies from {instance}...")
-                tweets = scraper.get_tweets(
-                    tweet_id,
-                    mode='thread',
-                    instance=f'https://{instance}'
-                )
+    for instance in NITTER_INSTANCES:
+        try:
+            nitter_url = f"https://{instance}/{username}/status/{tweet_id}"
+            print(f"[*] Fetching replies from {instance}...")
 
-                if tweets and 'tweets' in tweets and tweets['tweets']:
-                    # Filter to only replies (not the original thread tweets)
-                    replies = [
-                        t for t in tweets['tweets']
-                        if t.get('is-reply') or t.get('is_retweet') is False
-                    ][:MAX_REPLIES]
-
+            html = _fetch_nitter_html(nitter_url)
+            if html:
+                replies = _parse_replies(html, tweet_url)
+                if replies:
                     print(f"[✓] Fetched {len(replies)} replies from {instance}")
-                    return [
-                        {
-                            'text': t.get('text', ''),
-                            'author': t.get('user', {}).get('username', ''),
-                            'id': t.get('link', ''),
-                            'is_reply': True
-                        }
-                        for t in replies
-                    ]
-            except Exception as e:
-                print(f"[!] Instance {instance} failed for replies: {e}")
-                continue
+                    return replies
 
-        return []
-    except Exception as e:
-        print(f"[!] Reply fetch error: {e}")
-        return []
+        except Exception as e:
+            print(f"[!] Instance {instance} failed for replies: {e}")
+            continue
+
+    return []
+
+
+async def get_thread_tweets(tweet_url: str) -> list[dict]:
+    """Fetch all tweets in the thread using Nitter HTML parsing."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _get_thread_tweets_sync, tweet_url)
 
 
 async def get_replies(tweet_url: str) -> list[dict]:
-    """
-    Fetch replies to a tweet using ntscraper.
-
-    Returns list of reply dicts with 'text', 'author', 'id' keys.
-    Returns empty list if fetching fails.
-    """
+    """Fetch replies to a tweet using Nitter HTML parsing."""
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _get_replies_sync, tweet_url)
 
@@ -640,9 +745,9 @@ async def get_extended_sentiment(entry) -> dict:
 
     Returns a dict with:
     - main: Main tweet sentiment
-    - thread: Thread sentiment (if available)
-    - community: Non-bot reply sentiment (if available)
-    - author: Author reply sentiment (if available)
+    - thread: Thread sentiment (always present, may be empty)
+    - community: Non-bot reply sentiment (always present, may be empty)
+    - author: Author reply sentiment (always present, may be empty)
     """
     main_analysis = analyze_sentiment(entry)
     if not main_analysis:
@@ -661,13 +766,22 @@ async def get_extended_sentiment(entry) -> dict:
                 analysis = await analyze_tweet_sentiment(tweet)
                 if analysis:
                     thread_analyses.append(analysis)
-            result["thread"] = aggregate_sentiments(thread_analyses)
+            if thread_analyses:
+                result["thread"] = aggregate_sentiments(thread_analyses)
+            else:
+                print(f"[!] No thread analyses succeeded")
+                result["thread"] = aggregate_sentiments([])
+        else:
+            print(f"[!] No thread tweets found")
+            result["thread"] = aggregate_sentiments([])
 
     # Analyze replies
     if REPLY_ANALYSIS_ENABLED:
         replies = await get_replies(tweet_url)
         if replies:
+            print(f"[*] Found {len(replies)} total replies")
             author_replies, community_replies = filter_replies(replies)
+            print(f"[*] Filtered: {len(author_replies)} author, {len(community_replies)} community")
 
             # Analyze community replies
             if community_replies:
@@ -678,6 +792,9 @@ async def get_extended_sentiment(entry) -> dict:
                     if analysis:
                         community_analyses.append(analysis)
                 result["community"] = aggregate_sentiments(community_analyses)
+            else:
+                print(f"[!] No community replies after filtering")
+                result["community"] = aggregate_sentiments([])
 
             # Analyze author replies
             if author_replies:
@@ -688,6 +805,12 @@ async def get_extended_sentiment(entry) -> dict:
                     if analysis:
                         author_analyses.append(analysis)
                 result["author"] = aggregate_sentiments(author_analyses)
+            else:
+                result["author"] = aggregate_sentiments([])
+        else:
+            print(f"[!] No replies found")
+            result["community"] = aggregate_sentiments([])
+            result["author"] = aggregate_sentiments([])
 
     return result
 
