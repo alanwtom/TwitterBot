@@ -56,6 +56,14 @@ SENTIMENT_ENABLED = os.environ.get("SENTIMENT_ENABLED", "true").lower() == "true
 DB_PATH = os.environ.get("DB_PATH", "/data/sentiment.db")
 FLIP_ALERTS_ENABLED = os.environ.get("FLIP_ALERTS_ENABLED", "true").lower() == "true"
 
+# Outage detection
+OUTAGE_ALERT_THRESHOLD = 3  # consecutive failures before alerting
+RECOVERY_ALERT_ENABLED = True  # alert when feed recovers after outage
+
+# State tracking
+consecutive_failures = 0
+was_in_outage = False
+
 # Ticker filtering: comma-separated list of tickers to analyze (e.g., "BTC,ETH,SOL")
 # If empty, all tweets are analyzed
 TICKER_FILTERS = os.environ.get("TICKER_FILTERS", "").split(",") if os.environ.get("TICKER_FILTERS") else []
@@ -451,18 +459,11 @@ async def on_disconnect():
     print(f"[!] Disconnected from Discord")
 
 
-@tasks.loop(seconds=POLL_INTERVAL)
-async def poll_feed():
+async def fetch_feed_with_retry(channel, retry_count=0) -> tuple:
     """
-    Main polling loop. Fetches RSS feed, posts new tweets to Discord,
-    and creates threaded sentiment analysis.
+    Try to fetch RSS feed from all Nitter instances.
+    Returns (feed, working_instance) or (None, None) if all fail.
     """
-    channel = client.get_channel(DISCORD_CHANNEL_ID)
-    if not channel:
-        print("[!] Channel not found")
-        return
-
-    # Try each Nitter instance until one works
     feed = None
     working_instance = None
 
@@ -474,17 +475,75 @@ async def poll_feed():
             if feed.entries:
                 working_instance = instance
                 print(f"OK ({len(feed.entries)} entries)")
-                break
+                return feed, working_instance
             else:
                 print("empty")
         except Exception as e:
             print(f"failed: {e}")
 
+    return None, None
+
+
+async def send_outage_alert(channel, consecutive: int, is_recovery: bool = False) -> None:
+    """Send Discord alert for feed outage or recovery."""
+    if is_recovery:
+        color = 0x57F287  # green
+        title = "✅ Feed Recovered"
+        desc = f"RSS feed is back online after **{consecutive}** failed attempts."
+    else:
+        color = 0xED4245  # red
+        title = "⚠️ Feed Outage Detected"
+        desc = f"**{consecutive} consecutive failures** fetching RSS feed. Tweets may be missed!"
+
+    embed = discord.Embed(
+        title=title,
+        description=desc,
+        color=color
+    )
+    embed.add_field(name="Instances tried", value=", ".join(NITTER_INSTANCES), inline=False)
+    embed.set_footer(text="TwitterBot RSS Monitor")
+    embed.timestamp = datetime.now()
+
+    await channel.send(embed=embed)
+
+
+@tasks.loop(seconds=POLL_INTERVAL)
+async def poll_feed():
+    """
+    Main polling loop. Fetches RSS feed, posts new tweets to Discord,
+    and creates threaded sentiment analysis.
+    """
+    global consecutive_failures, was_in_outage
+
+    channel = client.get_channel(DISCORD_CHANNEL_ID)
+    if not channel:
+        print("[!] Channel not found")
+        return
+
+    # Try to fetch feed
+    feed, working_instance = await fetch_feed_with_retry(channel)
+
     if not feed or not feed.entries:
+        consecutive_failures += 1
         print(f"[–] All instances failed or no entries ({datetime.now().strftime('%H:%M:%S')})")
+
+        # Send outage alert after threshold
+        if consecutive_failures == OUTAGE_ALERT_THRESHOLD:
+            was_in_outage = True
+            print(f"[⚠️] Outage alert: {consecutive_failures} consecutive failures")
+            await send_outage_alert(channel, consecutive_failures, is_recovery=False)
         return
 
     entries = feed.entries
+
+    # Reset failure counter on success
+    if consecutive_failures >= OUTAGE_ALERT_THRESHOLD and was_in_outage:
+        print(f"[✅] Feed recovered after {consecutive_failures} failures")
+        if RECOVERY_ALERT_ENABLED:
+            await send_outage_alert(channel, consecutive_failures, is_recovery=True)
+        was_in_outage = False
+
+    consecutive_failures = 0
 
     try:
         # Load last processed ID
@@ -492,10 +551,32 @@ async def poll_feed():
 
         # Find new entries (newest first)
         new_entries = []
+        found_last_id = False
         for entry in entries:
             if entry.id == last_id:
+                found_last_id = True
                 break
             new_entries.append(entry)
+
+        # If we didn't find last_id, check if we have a gap
+        if not found_last_id and last_id:
+            print(f"[⚠️] Gap detected! last_id={last_id} not in feed ({len(entries)} entries)")
+            print(f"[⚠️] Tweets may have been missed during outage")
+
+            # Optional: Send alert about potential missed tweets
+            embed = discord.Embed(
+                title="🚨 Potential Missed Tweets",
+                description=f"Last processed tweet ID (`{last_id[:20]}...`) not found in current feed of {len(entries)} entries. "
+                           f"Any tweets posted during the outage may have been lost.",
+                color=0xFEE75C  # yellow
+            )
+            embed.add_field(name="Current feed range", value=f"From: `{entries[-1].id[:20]}...`\nTo: `{entries[0].id[:20]}...`", inline=False)
+            embed.set_footer(text="Consider checking the account directly for missed content")
+            embed.timestamp = datetime.now()
+            await channel.send(embed=embed)
+
+            # Process all current entries to get back on track
+            new_entries = list(entries)
 
         if not new_entries:
             print(f"[–] No new posts ({datetime.now().strftime('%H:%M:%S')})")
@@ -545,6 +626,8 @@ async def poll_feed():
 
     except Exception as e:
         print(f"[!] Error: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 def main():
