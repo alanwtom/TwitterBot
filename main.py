@@ -642,10 +642,9 @@ async def poll_feed():
                                 flip["new"]
                             )
 
-                        # Send tweet URL first (creates native embed), then analysis below
-                        await channel.send(twitter_url)
+                        # Send tweet URL and analysis in one message
                         embed = create_analysis_embed(analysis)
-                        await channel.send(embed=embed)
+                        await channel.send(content=twitter_url, embed=embed)
                         print(f"[✓] Sent analysis for {analysis['tickers']}: {twitter_url}")
                         continue  # Skip the fallback send
                     else:
