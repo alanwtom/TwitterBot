@@ -41,9 +41,10 @@ load_dotenv()
 # ──────────────────────────────────────────────────────────────
 
 # Nitter instances for fallback (tried in order)
+# nitter.net is the most reliable, though it may have rate limits
 NITTER_INSTANCES = os.environ.get(
     "NITTER_INSTANCES",
-    "nitter.poast.org,nitter.privacydev.com,nitter.fdn.fr,nitter.1d4.us"
+    "nitter.net,nitter.privacydev.com,nitter.fdn.fr"
 ).split(",")
 DEFAULT_USERNAME = os.environ.get("NITTER_USERNAME", "aleabitoreddit")
 
@@ -1008,23 +1009,32 @@ async def fetch_feed_with_retry(channel, retry_count=0) -> tuple:
     """
     Try to fetch RSS feed from all Nitter instances.
     Returns (feed, working_instance) or (None, None) if all fail.
+    A successful connection with empty entries is still returned as success.
     """
     feed = None
     working_instance = None
+    connection_succeeded = False
 
     for instance in NITTER_INSTANCES:
         rss_url = build_rss_url(instance, DEFAULT_USERNAME)
         try:
             print(f"[*] Trying {instance}...", end=" ")
             feed = feedparser.parse(rss_url)
+            connection_succeeded = True  # We successfully connected and parsed
             if feed.entries:
                 working_instance = instance
                 print(f"OK ({len(feed.entries)} entries)")
                 return feed, working_instance
             else:
-                print("empty")
+                print(f"OK (0 entries - no new tweets)")
+                # Return feed even if empty - this is a successful connection
+                return feed, instance
         except Exception as e:
             print(f"failed: {e}")
+
+    # If we at least connected to one instance (even if empty), return the feed
+    if connection_succeeded and feed is not None:
+        return feed, None
 
     return None, None
 
@@ -1068,9 +1078,10 @@ async def poll_feed():
     # Try to fetch feed
     feed, working_instance = await fetch_feed_with_retry(channel)
 
-    if not feed or not feed.entries:
+    # Only treat None feed as outage (empty feed is OK - just no new tweets)
+    if feed is None:
         consecutive_failures += 1
-        print(f"[–] All instances failed or no entries ({datetime.now().strftime('%H:%M:%S')})")
+        print(f"[–] All instances failed to connect ({datetime.now().strftime('%H:%M:%S')})")
 
         # Send outage alert after threshold
         if consecutive_failures == OUTAGE_ALERT_THRESHOLD:
@@ -1079,9 +1090,7 @@ async def poll_feed():
             await send_outage_alert(channel, consecutive_failures, is_recovery=False)
         return
 
-    entries = feed.entries
-
-    # Reset failure counter on success
+    # Reset failure counter on successful connection (even if empty)
     if consecutive_failures >= OUTAGE_ALERT_THRESHOLD and was_in_outage:
         print(f"[✅] Feed recovered after {consecutive_failures} failures")
         if RECOVERY_ALERT_ENABLED:
@@ -1089,6 +1098,13 @@ async def poll_feed():
         was_in_outage = False
 
     consecutive_failures = 0
+
+    # Check if feed has entries
+    if not feed.entries:
+        print(f"[–] No entries in feed ({datetime.now().strftime('%H:%M:%S')})")
+        return
+
+    entries = feed.entries
 
     try:
         # Load last processed ID
