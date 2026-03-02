@@ -15,20 +15,15 @@ Requirements (requirements.txt):
 import asyncio
 import json
 import os
-import re
 import sqlite3
 import feedparser
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
-from html import unescape
 
 import discord
 from discord.ext import tasks
 from groq import Groq
 from dotenv import load_dotenv
-import requests
-from bs4 import BeautifulSoup
 
 # Set user agent for Nitter (some instances block default user agent)
 feedparser.USER_AGENT = "Mozilla/5.0 (compatible; TwitterBot/1.0; +https://github.com/alanwtom/TwitterBot)"
@@ -73,13 +68,6 @@ was_in_outage = False
 # Ticker filtering: comma-separated list of tickers to analyze (e.g., "BTC,ETH,SOL")
 # If empty, all tweets are analyzed
 TICKER_FILTERS = os.environ.get("TICKER_FILTERS", "").split(",") if os.environ.get("TICKER_FILTERS") else []
-
-# Thread & Reply Analysis
-THREAD_ANALYSIS_ENABLED = os.environ.get("THREAD_ANALYSIS_ENABLED", "true").lower() == "true"
-REPLY_ANALYSIS_ENABLED = os.environ.get("REPLY_ANALYSIS_ENABLED", "true").lower() == "true"
-AUTHOR_USERNAME = os.environ.get("AUTHOR_USERNAME", "aleabitoreddit")  # For author reply filtering
-MAX_THREAD_TWEETS = int(os.environ.get("MAX_THREAD_TWEETS", "10"))  # Max tweets to analyze in thread
-MAX_REPLIES = int(os.environ.get("MAX_REPLIES", "20"))  # Max replies to analyze
 # ──────────────────────────────────────────────────────────────
 
 
@@ -329,494 +317,6 @@ async def send_flip_alert(channel, ticker: str, old_sentiment: str, new_sentimen
 
 
 # ──────────────────────────────────────────────────────────────
-# THREAD & REPLY ANALYSIS
-# ──────────────────────────────────────────────────────────────
-
-def extract_tweet_id(url: str) -> str | None:
-    """Extract tweet ID from a Twitter/Nitter URL."""
-    # Match patterns like: twitter.com/user/status/123456 or nitter.net/user/status/123456
-    match = re.search(r'/status/(\w+)', url)
-    return match.group(1) if match else None
-
-
-def _fetch_nitter_html(url: str) -> str | None:
-    """Fetch HTML from a Nitter instance."""
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (compatible; TwitterBot/1.0; +https://github.com/alanwtom/TwitterBot)'
-    }
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            return response.text
-    except Exception as e:
-        print(f"[!] Request failed: {e}")
-    return None
-
-
-def _parse_thread_tweets(html: str, tweet_url: str) -> list[dict]:
-    """Parse thread tweets from Nitter HTML."""
-    if not html:
-        return []
-
-    soup = BeautifulSoup(html, 'html.parser')
-    tweets = []
-
-    # Try multiple selectors for different Nitter versions
-    tweet_items = (
-        soup.find_all('div', class_='timeline-item') or
-        soup.find_all('div', class_='tweet') or
-        soup.find_all('article') or
-        []
-    )
-
-    print(f"[*] Found {len(tweet_items)} potential tweet items")
-
-    for item in tweet_items[:MAX_THREAD_TWEETS]:
-        try:
-            # Extract tweet text - try multiple selectors
-            text_elem = (
-                item.find('div', class_='tweet-content') or
-                item.find('div', class_='tweet-text') or
-                item.find('p', class_='tweet-text')
-            )
-            text = unescape(text_elem.get_text()) if text_elem else ""
-
-            # Extract username - try multiple selectors
-            username_elem = item.find('a', class_='username')
-            username = username_elem.get_text().strip('@') if username_elem else ""
-            if not username:
-                # Try alternative selector
-                username_elem = item.find('span', class_='username')
-                username = username_elem.get_text().strip('@') if username_elem else ""
-
-            # Extract tweet ID from link
-            tweet_id = ""
-            link_elem = item.find('a', class_='tweet-link')
-            if link_elem and link_elem.get('href'):
-                id_match = re.search(r'/status/(\w+)', link_elem.get('href', ''))
-                if id_match:
-                    tweet_id = id_match.group(1)
-
-            # Only add if we have meaningful content
-            if text and len(text.strip()) > 5:
-                tweets.append({
-                    'text': text.strip(),
-                    'author': username,
-                    'id': tweet_id,
-                    'is_thread': True
-                })
-        except Exception as e:
-            print(f"[!] Error parsing tweet: {e}")
-            continue
-
-    print(f"[✓] Parsed {len(tweets)} thread tweets")
-    return tweets
-
-
-def _parse_replies(html: str, tweet_url: str) -> list[dict]:
-    """Parse replies from Nitter HTML."""
-    if not html:
-        return []
-
-    soup = BeautifulSoup(html, 'html.parser')
-    replies = []
-
-    # Try multiple selectors for different Nitter versions
-    tweet_items = (
-        soup.find_all('div', class_='timeline-item') or
-        soup.find_all('div', class_='tweet') or
-        soup.find_all('article') or
-        []
-    )
-
-    for item in tweet_items:
-        try:
-            # Check if this is a reply (has "Replying to" text)
-            replying_elem = item.find('div', class_='replying-to')
-            is_reply = replying_elem is not None
-
-            # Alternative: check if tweet has a reply icon indicator
-            if not is_reply:
-                icon_div = item.find('div', class_='tweet-icon')
-                if icon_div and 'reply' in str(icon_div).lower():
-                    is_reply = True
-
-            # Skip if not a reply
-            if not is_reply:
-                continue
-
-            # Extract tweet text
-            text_elem = (
-                item.find('div', class_='tweet-content') or
-                item.find('div', class_='tweet-text')
-            )
-            text = unescape(text_elem.get_text()) if text_elem else ""
-
-            # Extract username
-            username_elem = item.find('a', class_='username')
-            username = username_elem.get_text().strip('@') if username_elem else ""
-
-            # Extract tweet ID from link
-            tweet_id = ""
-            link_elem = item.find('a', class_='tweet-link')
-            if link_elem and link_elem.get('href'):
-                id_match = re.search(r'/status/(\w+)', link_elem.get('href', ''))
-                if id_match:
-                    tweet_id = id_match.group(1)
-
-            if text and len(text.strip()) > 5:
-                replies.append({
-                    'text': text.strip(),
-                    'author': username,
-                    'id': tweet_id,
-                    'is_reply': True
-                })
-        except Exception as e:
-            continue
-
-    print(f"[✓] Parsed {len(replies)} replies")
-    return replies[:MAX_REPLIES]
-
-
-def _get_thread_tweets_sync(tweet_url: str) -> list[dict]:
-    """Synchronous helper to fetch thread tweets from Nitter."""
-    if not THREAD_ANALYSIS_ENABLED:
-        return []
-
-    tweet_id = extract_tweet_id(tweet_url)
-    if not tweet_id:
-        print(f"[!] Could not extract tweet ID from {tweet_url}")
-        return []
-
-    # Try to find the username from the URL
-    username_match = re.search(r'(?:twitter\.com|nitter\.\w+)/([^/]+)/status', tweet_url)
-    if not username_match:
-        # Use default username
-        username = DEFAULT_USERNAME
-    else:
-        username = username_match.group(1)
-
-    for instance in NITTER_INSTANCES:
-        try:
-            # Construct Nitter URL for the tweet
-            nitter_url = f"https://{instance}/{username}/status/{tweet_id}"
-            print(f"[*] Fetching thread from {instance}...")
-
-            html = _fetch_nitter_html(nitter_url)
-            if html:
-                tweets = _parse_thread_tweets(html, tweet_url)
-                if tweets:
-                    print(f"[✓] Fetched {len(tweets)} thread tweets from {instance}")
-                    return tweets
-
-        except Exception as e:
-            print(f"[!] Instance {instance} failed for thread: {e}")
-            continue
-
-    print(f"[!] All instances failed for thread fetch")
-    return []
-
-
-def _get_replies_sync(tweet_url: str) -> list[dict]:
-    """Synchronous helper to fetch replies from Nitter."""
-    if not REPLY_ANALYSIS_ENABLED:
-        return []
-
-    tweet_id = extract_tweet_id(tweet_url)
-    if not tweet_id:
-        return []
-
-    username_match = re.search(r'(?:twitter\.com|nitter\.\w+)/([^/]+)/status', tweet_url)
-    if not username_match:
-        username = DEFAULT_USERNAME
-    else:
-        username = username_match.group(1)
-
-    for instance in NITTER_INSTANCES:
-        try:
-            nitter_url = f"https://{instance}/{username}/status/{tweet_id}"
-            print(f"[*] Fetching replies from {instance}...")
-
-            html = _fetch_nitter_html(nitter_url)
-            if html:
-                replies = _parse_replies(html, tweet_url)
-                if replies:
-                    print(f"[✓] Fetched {len(replies)} replies from {instance}")
-                    return replies
-
-        except Exception as e:
-            print(f"[!] Instance {instance} failed for replies: {e}")
-            continue
-
-    return []
-
-
-async def get_thread_tweets(tweet_url: str) -> list[dict]:
-    """Fetch all tweets in the thread using Nitter HTML parsing."""
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _get_thread_tweets_sync, tweet_url)
-
-
-async def get_replies(tweet_url: str) -> list[dict]:
-    """Fetch replies to a tweet using Nitter HTML parsing."""
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _get_replies_sync, tweet_url)
-
-
-def is_bot_reply(reply: dict) -> bool:
-    """
-    Detect if a reply is from a bot using heuristics.
-
-    Returns True if the reply appears to be from a bot.
-    """
-    username = reply.get('author', '').lower()
-    text = reply.get('text', '').lower()
-
-    # Always include the author's own replies
-    if username == AUTHOR_USERNAME.lower():
-        return False
-
-    # Bot username patterns
-    bot_patterns = [
-        r'bot$',           # ends in 'bot'
-        r'_bot_',          # contains '_bot_'
-        r'^.*_.*_.*_.*$',  # multiple underscores
-        r'\d{4,}$',        # ends in 4+ numbers
-    ]
-
-    for pattern in bot_patterns:
-        if re.search(pattern, username):
-            return True
-
-    # Generic bot reply phrases
-    bot_phrases = [
-        'nice project',
-        'great project',
-        'to the moon',
-        'moon soon',
-        'diamond hands',
-        'holding strong',
-        'when launch',
-        'when token',
-        'when presale',
-        'gm gm',
-        'gn gn',
-        '🚀🚀🚀',
-    ]
-
-    for phrase in bot_phrases:
-        if phrase in text:
-            return True
-
-    # Very short replies (likely low effort/bot)
-    if len(text) < 10 and not any(c.isalpha() for c in text):
-        return True
-
-    return False
-
-
-def filter_replies(replies: list[dict]) -> tuple[list[dict], list[dict]]:
-    """
-    Filter replies into author replies and non-bot community replies.
-
-    Returns:
-        (author_replies, community_replies)
-    """
-    author_replies = []
-    community_replies = []
-
-    for reply in replies:
-        username = reply.get('author', '').lower()
-
-        # Author's own replies
-        if username == AUTHOR_USERNAME.lower():
-            author_replies.append(reply)
-        # Non-bot replies
-        elif not is_bot_reply(reply):
-            community_replies.append(reply)
-
-    return author_replies, community_replies
-
-
-async def analyze_tweet_sentiment(tweet: dict) -> dict | None:
-    """
-    Analyze sentiment for a single tweet using Groq.
-
-    Args:
-        tweet: Dict with 'text' and 'author' keys
-
-    Returns:
-        Sentiment analysis dict or None if failed
-    """
-    client = Groq(api_key=GROQ_API_KEY)
-
-    content = tweet.get('text', '')
-    author = tweet.get('author', 'Unknown')
-
-    prompt = SENTIMENT_PROMPT.format(author=author, content=content)
-
-    try:
-        response = client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": "You are a financial sentiment analyst. Always respond with valid JSON only."},
-                {"role": "user", "content": prompt}
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.1,
-        )
-        return json.loads(response.choices[0].message.content)
-    except Exception as e:
-        print(f"[!] Groq error for tweet by {author}: {e}")
-        return None
-
-
-def aggregate_sentiments(analyses: list[dict]) -> dict:
-    """
-    Aggregate multiple sentiment analyses into a single result.
-
-    Uses confidence-weighted averaging based on sentiment strength.
-    """
-    if not analyses:
-        return {
-            "sentiment": "NEUTRAL",
-            "tickers": [],
-            "bull_case": "No data available",
-            "bear_case": "No data available",
-            "summary": "No tweets analyzed",
-            "sample_size": 0
-        }
-
-    # Count sentiments
-    buy_count = sum(1 for a in analyses if a.get('sentiment') == 'BUY')
-    sell_count = sum(1 for a in analyses if a.get('sentiment') == 'SELL')
-    neutral_count = sum(1 for a in analyses if a.get('sentiment') == 'NEUTRAL')
-
-    # Determine aggregate sentiment
-    total = len(analyses)
-    if buy_count > sell_count and buy_count > neutral_count:
-        sentiment = "BUY"
-    elif sell_count > buy_count and sell_count > neutral_count:
-        sentiment = "SELL"
-    else:
-        # Tie or neutral majority
-        if buy_count == sell_count:
-            sentiment = "NEUTRAL"
-        elif buy_count > sell_count:
-            sentiment = "BUY"
-        else:
-            sentiment = "SELL"
-
-    # Collect all unique tickers
-    all_tickers = set()
-    for a in analyses:
-        all_tickers.update(a.get('tickers', []))
-    tickers = list(all_tickers)[:5]
-
-    # Aggregate bull/bear cases
-    bull_cases = [a.get('bull_case', '') for a in analyses if a.get('bull_case')]
-    bear_cases = [a.get('bear_case', '') for a in analyses if a.get('bear_case')]
-
-    # Join non-empty cases
-    bull_case = "\n".join(bull_cases[:3]) if bull_cases else "No bullish signals detected"
-    bear_case = "\n".join(bear_cases[:3]) if bear_cases else "No bearish signals detected"
-
-    # Summary based on counts
-    summary = (
-        f"Analyzed {total} tweet(s): {buy_count} bullish, {sell_count} bearish, "
-        f"{neutral_count} neutral. Overall signal: {sentiment}."
-    )
-
-    return {
-        "sentiment": sentiment,
-        "tickers": tickers,
-        "bull_case": bull_case[:500],
-        "bear_case": bear_case[:500],
-        "summary": summary,
-        "sample_size": total,
-        "buy_count": buy_count,
-        "sell_count": sell_count,
-        "neutral_count": neutral_count
-    }
-
-
-async def get_extended_sentiment(entry) -> dict:
-    """
-    Get extended sentiment analysis including thread and replies.
-
-    Returns a dict with:
-    - main: Main tweet sentiment
-    - thread: Thread sentiment (always present, may be empty)
-    - community: Non-bot reply sentiment (always present, may be empty)
-    - author: Author reply sentiment (always present, may be empty)
-    """
-    main_analysis = analyze_sentiment(entry)
-    if not main_analysis:
-        return {"main": None}
-
-    result = {"main": main_analysis}
-    tweet_url = nitter_to_twitter(entry.link)
-
-    # Analyze thread
-    if THREAD_ANALYSIS_ENABLED:
-        thread_tweets = await get_thread_tweets(tweet_url)
-        if thread_tweets:
-            print(f"[*] Analyzing {len(thread_tweets)} thread tweets...")
-            thread_analyses = []
-            for tweet in thread_tweets:
-                analysis = await analyze_tweet_sentiment(tweet)
-                if analysis:
-                    thread_analyses.append(analysis)
-            if thread_analyses:
-                result["thread"] = aggregate_sentiments(thread_analyses)
-            else:
-                print(f"[!] No thread analyses succeeded")
-                result["thread"] = aggregate_sentiments([])
-        else:
-            print(f"[!] No thread tweets found")
-            result["thread"] = aggregate_sentiments([])
-
-    # Analyze replies
-    if REPLY_ANALYSIS_ENABLED:
-        replies = await get_replies(tweet_url)
-        if replies:
-            print(f"[*] Found {len(replies)} total replies")
-            author_replies, community_replies = filter_replies(replies)
-            print(f"[*] Filtered: {len(author_replies)} author, {len(community_replies)} community")
-
-            # Analyze community replies
-            if community_replies:
-                print(f"[*] Analyzing {len(community_replies)} non-bot replies...")
-                community_analyses = []
-                for reply in community_replies[:MAX_REPLIES]:
-                    analysis = await analyze_tweet_sentiment(reply)
-                    if analysis:
-                        community_analyses.append(analysis)
-                result["community"] = aggregate_sentiments(community_analyses)
-            else:
-                print(f"[!] No community replies after filtering")
-                result["community"] = aggregate_sentiments([])
-
-            # Analyze author replies
-            if author_replies:
-                print(f"[*] Analyzing {len(author_replies)} author replies...")
-                author_analyses = []
-                for reply in author_replies:
-                    analysis = await analyze_tweet_sentiment(reply)
-                    if analysis:
-                        author_analyses.append(analysis)
-                result["author"] = aggregate_sentiments(author_analyses)
-            else:
-                result["author"] = aggregate_sentiments([])
-        else:
-            print(f"[!] No replies found")
-            result["community"] = aggregate_sentiments([])
-            result["author"] = aggregate_sentiments([])
-
-    return result
-
-
-# ──────────────────────────────────────────────────────────────
 # GROQ SENTIMENT ANALYSIS
 # ──────────────────────────────────────────────────────────────
 
@@ -876,11 +376,10 @@ def create_analysis_embed(analysis: dict, tweet_url: str = None) -> discord.Embe
     Create a Discord Embed for sentiment analysis.
 
     Args:
-        analysis: Extended sentiment dict with main, thread, community, author keys
+        analysis: Sentiment analysis dict from Groq
         tweet_url: Original tweet URL to include in the embed
     """
-    main = analysis.get("main", {})
-    sentiment = main.get("sentiment", "NEUTRAL").upper()
+    sentiment = analysis.get("sentiment", "NEUTRAL").upper()
 
     # Color based on sentiment
     colors = {
@@ -895,7 +394,7 @@ def create_analysis_embed(analysis: dict, tweet_url: str = None) -> discord.Embe
     signal_emoji = emojis.get(sentiment, "⚪")
 
     # Format tickers
-    tickers = main.get("tickers", [])
+    tickers = analysis.get("tickers", [])
     if tickers:
         ticker_display = " ".join(f"`${t}`" if not t.startswith("$") else f"`{t}`" for t in tickers[:5])
     else:
@@ -907,9 +406,9 @@ def create_analysis_embed(analysis: dict, tweet_url: str = None) -> discord.Embe
         description += f"\n\n[**View Original Tweet**]({tweet_url})"
 
     # Truncate long fields
-    bull_case = main.get('bull_case', '')[:350] + "..." if len(main.get('bull_case', '')) > 350 else main.get('bull_case', '')
-    bear_case = main.get('bear_case', '')[:350] + "..." if len(main.get('bear_case', '')) > 350 else main.get('bear_case', '')
-    summary = main.get('summary', '')[:400] + "..." if len(main.get('summary', '')) > 400 else main.get('summary', '')
+    bull_case = analysis.get('bull_case', '')[:350] + "..." if len(analysis.get('bull_case', '')) > 350 else analysis.get('bull_case', '')
+    bear_case = analysis.get('bear_case', '')[:350] + "..." if len(analysis.get('bear_case', '')) > 350 else analysis.get('bear_case', '')
+    summary = analysis.get('summary', '')[:400] + "..." if len(analysis.get('summary', '')) > 400 else analysis.get('summary', '')
 
     embed = discord.Embed(
         title=f"{signal_emoji} {sentiment} Signal",
@@ -927,30 +426,6 @@ def create_analysis_embed(analysis: dict, tweet_url: str = None) -> discord.Embe
     # Add summary
     if summary:
         embed.add_field(name="📝 Summary", value=summary, inline=False)
-
-    # Add extended sentiment section if available
-    extended_fields = []
-
-    if "thread" in analysis:
-        thread = analysis["thread"]
-        thread_emoji = emojis.get(thread.get("sentiment", "NEUTRAL"), "⚪")
-        sample_size = thread.get("sample_size", 0)
-        extended_fields.append(f"💬 **Thread:** {thread_emoji} `{thread.get('sentiment', 'N/A')}` ({sample_size} tweets)")
-
-    if "community" in analysis:
-        comm = analysis["community"]
-        comm_emoji = emojis.get(comm.get("sentiment", "NEUTRAL"), "⚪")
-        sample_size = comm.get("sample_size", 0)
-        extended_fields.append(f"👥 **Community (non-bot):** {comm_emoji} `{comm.get('sentiment', 'N/A')}` ({sample_size} replies)")
-
-    if "author" in analysis:
-        auth = analysis["author"]
-        auth_emoji = emojis.get(auth.get("sentiment", "NEUTRAL"), "⚪")
-        sample_size = auth.get("sample_size", 0)
-        extended_fields.append(f"✍️ **Author replies:** {auth_emoji} `{auth.get('sentiment', 'N/A')}` ({sample_size} replies)")
-
-    if extended_fields:
-        embed.add_field(name="📊 Extended Sentiment", value="\n".join(extended_fields), inline=False)
 
     # Add footer and timestamp
     embed.set_footer(text="AI-powered sentiment analysis • Llama 3.3 70B on Groq")
@@ -978,8 +453,6 @@ async def on_ready():
     else:
         print(f"Ticker filters: None (analyzing all tweets)")
     print(f"Polling every {POLL_INTERVAL}s")
-    print(f"Thread analysis: {'enabled' if THREAD_ANALYSIS_ENABLED else 'disabled'}")
-    print(f"Reply analysis: {'enabled' if REPLY_ANALYSIS_ENABLED else 'disabled'}")
 
     # Initialize database
     init_db()
@@ -1159,16 +632,15 @@ async def poll_feed():
 
             # Try sentiment analysis first
             if SENTIMENT_ENABLED:
-                extended_analysis = await get_extended_sentiment(entry)
-                if extended_analysis.get("main") and extended_analysis["main"].get("tickers"):
-                    main_analysis = extended_analysis["main"]
+                analysis = analyze_sentiment(entry)
+                if analysis and analysis.get("tickers"):
                     # Check if we should analyze based on ticker filters
-                    if should_analyze(main_analysis["tickers"]):
+                    if should_analyze(analysis["tickers"]):
                         # Save to database for historical tracking
-                        save_sentiment(entry, main_analysis)
+                        save_sentiment(entry, analysis)
 
                         # Check for sentiment flips and send alerts
-                        flips = check_sentiment_flip(main_analysis)
+                        flips = check_sentiment_flip(analysis)
                         for flip in flips:
                             await send_flip_alert(
                                 channel,
@@ -1178,12 +650,12 @@ async def poll_feed():
                             )
 
                         # Send analysis embed directly to channel (includes tweet URL)
-                        embed = create_analysis_embed(extended_analysis, twitter_url)
+                        embed = create_analysis_embed(analysis, twitter_url)
                         await channel.send(embed=embed)
-                        print(f"[✓] Sent analysis for {main_analysis['tickers']}: {twitter_url}")
+                        print(f"[✓] Sent analysis for {analysis['tickers']}: {twitter_url}")
                         continue  # Skip the bare URL send
                     else:
-                        print(f"[–] Skipped analysis (filtered tickers: {main_analysis['tickers']})")
+                        print(f"[–] Skipped analysis (filtered tickers: {analysis['tickers']})")
 
             # Fallback: send bare tweet URL if analysis disabled or failed
             await channel.send(twitter_url)
