@@ -118,6 +118,15 @@ def should_analyze(tickers: list) -> bool:
 # DATABASE & SENTIMENT HISTORY
 # ──────────────────────────────────────────────────────────────
 
+def to_str(value, default=""):
+    """Safely convert any value to string for SQLite. Lists become JSON strings."""
+    if value is None:
+        return default
+    if isinstance(value, list):
+        return json.dumps(value)
+    return str(value)
+
+
 def init_db() -> None:
     """Initialize the SQLite database and create tables if they don't exist."""
     # Ensure directory exists
@@ -169,9 +178,6 @@ def save_sentiment(entry, analysis: dict) -> None:
         author = entry.get('author', 'Unknown')
         tweet_url = nitter_to_twitter(entry.link)
 
-        # Convert tickers list to JSON string
-        tickers_json = json.dumps(analysis.get("tickers", []))
-
         cursor.execute("""
             INSERT OR REPLACE INTO sentiment_history
             (tweet_id, tweet_url, author, content, tickers, sentiment, bull_case, bear_case, summary)
@@ -181,11 +187,11 @@ def save_sentiment(entry, analysis: dict) -> None:
             tweet_url,
             author,
             content,
-            tickers_json,
-            analysis.get("sentiment", "NEUTRAL"),
-            analysis.get("bull_case", ""),
-            analysis.get("bear_case", ""),
-            analysis.get("summary", "")
+            to_str(analysis.get("tickers", [])),
+            to_str(analysis.get("sentiment", "NEUTRAL")),
+            to_str(analysis.get("bull_case", "")),
+            to_str(analysis.get("bear_case", "")),
+            to_str(analysis.get("summary", ""))
         ))
 
         conn.commit()
@@ -585,6 +591,16 @@ async def poll_feed():
         # Process oldest first for chronological order
         for entry in reversed(new_entries):
             twitter_url = nitter_to_twitter(entry.link)
+
+            # Log timing info to diagnose delays
+            tweet_time = entry.get('published_parsed')
+            if tweet_time:
+                tweet_dt = datetime(*tweet_time[:6])
+                now_dt = datetime.now()
+                lag_seconds = int((now_dt - tweet_dt).total_seconds())
+                print(f"[🕐] Tweet: {tweet_dt.strftime('%H:%M:%S')} | Sent: {now_dt.strftime('%H:%M:%S')} | Lag: {lag_seconds}s")
+            else:
+                print(f"[🕐] Tweet time: unknown | Sent: {datetime.now().strftime('%H:%M:%S')}")
 
             # Send tweet URL to channel
             message = await channel.send(twitter_url)
