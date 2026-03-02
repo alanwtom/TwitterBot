@@ -371,13 +371,12 @@ def analyze_sentiment(entry) -> dict | None:
         return None
 
 
-def create_analysis_embed(analysis: dict, tweet_url: str = None) -> discord.Embed:
+def create_analysis_embed(analysis: dict) -> discord.Embed:
     """
     Create a Discord Embed for sentiment analysis.
 
     Args:
         analysis: Sentiment analysis dict from Groq
-        tweet_url: Original tweet URL to include in the embed
     """
     sentiment = analysis.get("sentiment", "NEUTRAL").upper()
 
@@ -400,11 +399,6 @@ def create_analysis_embed(analysis: dict, tweet_url: str = None) -> discord.Embe
     else:
         ticker_display = "None detected"
 
-    # Build description with tweet link
-    description = f"**Tickers:** {ticker_display}"
-    if tweet_url:
-        description += f"\n\n[**View Original Tweet**]({tweet_url})"
-
     # Truncate long fields
     bull_case = analysis.get('bull_case', '')[:350] + "..." if len(analysis.get('bull_case', '')) > 350 else analysis.get('bull_case', '')
     bear_case = analysis.get('bear_case', '')[:350] + "..." if len(analysis.get('bear_case', '')) > 350 else analysis.get('bear_case', '')
@@ -412,9 +406,8 @@ def create_analysis_embed(analysis: dict, tweet_url: str = None) -> discord.Embe
 
     embed = discord.Embed(
         title=f"{signal_emoji} {sentiment} Signal",
-        description=description,
-        color=color,
-        url=tweet_url or ""
+        description=f"**Tickers:** {ticker_display}",
+        color=color
     )
 
     # Add bullish and bearish cases
@@ -649,11 +642,12 @@ async def poll_feed():
                                 flip["new"]
                             )
 
-                        # Send analysis embed directly to channel (includes tweet URL)
-                        embed = create_analysis_embed(analysis, twitter_url)
+                        # Send tweet URL first (creates native embed), then analysis below
+                        await channel.send(twitter_url)
+                        embed = create_analysis_embed(analysis)
                         await channel.send(embed=embed)
                         print(f"[✓] Sent analysis for {analysis['tickers']}: {twitter_url}")
-                        continue  # Skip the bare URL send
+                        continue  # Skip the fallback send
                     else:
                         print(f"[–] Skipped analysis (filtered tickers: {analysis['tickers']})")
 
