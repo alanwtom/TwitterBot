@@ -1162,7 +1162,7 @@ async def poll_feed():
                             )
 
                         # Send analysis embed directly to channel (includes tweet URL)
-                        embed = create_analysis_embed(extended_analysis, tweet_url)
+                        embed = create_analysis_embed(extended_analysis, twitter_url)
                         await channel.send(embed=embed)
                         print(f"[✓] Sent analysis for {main_analysis['tickers']}: {twitter_url}")
                         continue  # Skip the bare URL send
