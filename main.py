@@ -43,7 +43,7 @@ load_dotenv()
 # Nitter instances for fallback (tried in order)
 NITTER_INSTANCES = os.environ.get(
     "NITTER_INSTANCES",
-    "nitter.net,nitter.privacydev.net,nitter.mint.lgbt,nitter.poast.org"
+    "nitter.poast.org,nitter.privacydev.com,nitter.fdn.fr,nitter.1d4.us"
 ).split(",")
 DEFAULT_USERNAME = os.environ.get("NITTER_USERNAME", "aleabitoreddit")
 
