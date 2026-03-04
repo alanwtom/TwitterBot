@@ -61,6 +61,17 @@ FLIP_ALERTS_ENABLED = os.environ.get("FLIP_ALERTS_ENABLED", "true").lower() == "
 OUTAGE_ALERT_THRESHOLD = 3  # consecutive failures before alerting
 RECOVERY_ALERT_ENABLED = True  # alert when feed recovers after outage
 
+# Instance health tracking
+# Format: {"instance": {"successes": int, "failures": int, "last_success": str}}
+instance_health = {}
+HEALTH_TRACKING_ENABLED = True  # track and prioritize healthy instances
+
+# RSS-Bridge fallback (optional secondary source)
+RSS_BRIDGE_URL = os.environ.get("RSS_BRIDGE_URL", "").strip()
+
+# Twitter API fallback (optional emergency use)
+TWITTER_BEARER_TOKEN = os.environ.get("TWITTER_BEARER_TOKEN", "").strip()
+
 # State tracking
 consecutive_failures = 0
 was_in_outage = False
@@ -113,6 +124,93 @@ def should_analyze(tickers: list) -> bool:
     detected_upper = [t.upper().lstrip("$") for t in tickers]
     filters_upper = [f.upper().lstrip("$") for f in TICKER_FILTERS]
     return bool(set(detected_upper) & set(filters_upper))
+
+
+# ──────────────────────────────────────────────────────────────
+# INSTANCE HEALTH TRACKING
+# ──────────────────────────────────────────────────────────────
+
+def update_instance_health(instance: str, success: bool) -> None:
+    """
+    Update health tracking for a Nitter instance.
+
+    Args:
+        instance: The Nitter instance domain (e.g., "nitter.net")
+        success: Whether the request succeeded
+    """
+    if not HEALTH_TRACKING_ENABLED:
+        return
+
+    if instance not in instance_health:
+        instance_health[instance] = {"successes": 0, "failures": 0, "last_success": None}
+
+    if success:
+        instance_health[instance]["successes"] += 1
+        instance_health[instance]["last_success"] = datetime.now().isoformat()
+    else:
+        instance_health[instance]["failures"] += 1
+
+
+def get_instance_success_rate(instance: str) -> float:
+    """
+    Calculate success rate for an instance.
+
+    Returns:
+        Success rate as float (0.0 to 1.0), or 0.5 if no data
+    """
+    if instance not in instance_health:
+        return 0.5  # Unknown instances get middle priority
+
+    stats = instance_health[instance]
+    total = stats["successes"] + stats["failures"]
+    if total == 0:
+        return 0.5
+
+    return stats["successes"] / total
+
+
+def get_healthy_instances() -> list[str]:
+    """
+    Get Nitter instances sorted by health (highest success rate first).
+
+    Returns:
+        List of instance domains sorted by reliability
+    """
+    instances = list(set(NITTER_INSTANCES))  # Remove duplicates
+    # Sort by success rate (descending), then by total attempts (more data = better)
+    sorted_instances = sorted(
+        instances,
+        key=lambda inst: (
+            get_instance_success_rate(inst),
+            instance_health.get(inst, {}).get("successes", 0) +
+            instance_health.get(inst, {}).get("failures", 0)
+        ),
+        reverse=True
+    )
+    return sorted_instances
+
+
+def get_health_summary() -> dict:
+    """
+    Get a summary of instance health for debugging/monitoring.
+
+    Returns:
+        Dict with instance health stats
+    """
+    summary = {}
+    for instance in NITTER_INSTANCES:
+        if instance in instance_health:
+            stats = instance_health[instance]
+            total = stats["successes"] + stats["failures"]
+            success_rate = get_instance_success_rate(instance)
+            summary[instance] = {
+                "success_rate": f"{success_rate:.1%}",
+                "total_requests": total,
+                "last_success": stats["last_success"]
+            }
+        else:
+            summary[instance] = {"status": "no data"}
+    return summary
 
 
 # ──────────────────────────────────────────────────────────────
@@ -441,6 +539,11 @@ async def on_ready():
     print(f"Logged in as {client.user}")
     print(f"Username: @{DEFAULT_USERNAME}")
     print(f"Nitter instances: {', '.join(NITTER_INSTANCES)}")
+    print(f"Health tracking: {'enabled' if HEALTH_TRACKING_ENABLED else 'disabled'}")
+    if RSS_BRIDGE_URL:
+        print(f"RSS-Bridge: {RSS_BRIDGE_URL}")
+    if TWITTER_BEARER_TOKEN:
+        print(f"Twitter API fallback: enabled (emergency only)")
     if TICKER_FILTERS:
         print(f"Ticker filters: {', '.join(TICKER_FILTERS)}")
     else:
@@ -471,37 +574,182 @@ async def on_disconnect():
     print(f"[!] Disconnected from Discord")
 
 
-async def fetch_feed_with_retry(channel, retry_count=0) -> tuple:
+async def fetch_from_nitter(instances: list, username: str) -> tuple:
     """
-    Try to fetch RSS feed from all Nitter instances.
-    Returns (feed, working_instance) or (None, None) if all fail.
-    A successful connection with empty entries is still returned as success.
+    Try to fetch RSS feed from Nitter instances.
+
+    Args:
+        instances: List of Nitter instance domains to try
+        username: Twitter username to fetch
+
+    Returns:
+        (feed, working_instance, success) tuple where:
+        - feed: Parsed feed or None
+        - working_instance: Instance that succeeded or None
+        - success: True if at least one connection succeeded
     """
     feed = None
     working_instance = None
     connection_succeeded = False
 
-    for instance in NITTER_INSTANCES:
-        rss_url = build_rss_url(instance, DEFAULT_USERNAME)
+    for instance in instances:
+        rss_url = build_rss_url(instance, username)
         try:
             print(f"[*] Trying {instance}...", end=" ")
             feed = feedparser.parse(rss_url)
-            connection_succeeded = True  # We successfully connected and parsed
+            connection_succeeded = True
+            update_instance_health(instance, True)
+
             if feed.entries:
                 working_instance = instance
                 print(f"OK ({len(feed.entries)} entries)")
-                return feed, working_instance
+                return feed, working_instance, True
             else:
                 print(f"OK (0 entries - no new tweets)")
-                # Return feed even if empty - this is a successful connection
-                return feed, instance
+                return feed, instance, True
         except Exception as e:
             print(f"failed: {e}")
+            update_instance_health(instance, False)
 
     # If we at least connected to one instance (even if empty), return the feed
     if connection_succeeded and feed is not None:
-        return feed, None
+        return feed, None, True
 
+    return None, None, False
+
+
+async def fetch_from_rss_bridge(username: str) -> tuple:
+    """
+    Fetch tweets using RSS-Bridge as a fallback.
+
+    Args:
+        username: Twitter username to fetch
+
+    Returns:
+        (feed, success) tuple
+    """
+    if not RSS_BRIDGE_URL:
+        return None, False
+
+    try:
+        print(f"[*] Trying RSS-Bridge...", end=" ")
+        # RSS-Bridge Twitter bridge URL format
+        url = f"{RSS_BRIDGE_URL}?action=display&bridge=Twitter&context=Username&u={username}&format=Atom"
+        feed = feedparser.parse(url)
+
+        # Check if we got valid data
+        if feed and hasattr(feed, 'entries'):
+            print(f"OK ({len(feed.entries)} entries)")
+            return feed, True
+        else:
+            print(f"failed: no entries")
+            return None, False
+    except Exception as e:
+        print(f"RSS-Bridge failed: {e}")
+        return None, False
+
+
+async def fetch_from_twitter_api(username: str) -> tuple:
+    """
+    Fetch tweets using Twitter API as emergency fallback.
+
+    This is a "break glass" option - only use when free methods fail.
+    Note: Requires TWITTER_BEARER_TOKEN and uses Twitter API (costs money).
+
+    Args:
+        username: Twitter username to fetch
+
+    Returns:
+        (feed, success) tuple
+    """
+    if not TWITTER_BEARER_TOKEN:
+        return None, False
+
+    try:
+        print(f"[*] Trying Twitter API (emergency fallback)...", end=" ")
+
+        import tweepy
+
+        # Fetch recent tweets using Twitter API v2
+        client = tweepy.Client(bearer_token=TWITTER_BEARER_TOKEN)
+        user = client.get_user(username=username)
+
+        if not user.data:
+            print(f"failed: user not found")
+            return None, False
+
+        tweets = client.get_users_tweets(
+            id=user.data.id,
+            max_results=10,
+            tweet_fields=["created_at", "author_id", "public_metrics"]
+        )
+
+        if not tweets.data:
+            print(f"OK (0 entries - no new tweets)")
+            # Return empty feed-like structure
+            return type('obj', (object,), {'entries': []}), True
+
+        # Convert Twitter API response to feed-like format
+        # This maintains compatibility with existing code
+        class FeedEntry:
+            def __init__(self, tweet):
+                self.id = str(tweet.id)
+                self.link = f"https://twitter.com/{username}/status/{tweet.id}"
+                self.title = tweet.text[:100] + "..." if len(tweet.text) > 100 else tweet.text
+                self.summary = tweet.text
+                self.author = username
+                self.published_parsed = tweet.created_at.timetuple() if tweet.created_at else None
+
+        feed = type('obj', (object,), {
+            'entries': [FeedEntry(tweet) for tweet in tweets.data]
+        })
+
+        print(f"OK ({len(feed.entries)} entries)")
+        return feed, True
+
+    except ImportError:
+        print(f"Twitter API not available (tweepy not installed)")
+        return None, False
+    except Exception as e:
+        print(f"Twitter API failed: {e}")
+        return None, False
+
+
+async def fetch_feed_with_retry(channel, retry_count=0) -> tuple:
+    """
+    Try to fetch RSS feed using multiple sources with health tracking.
+
+    Fallback order:
+    1. Nitter instances (sorted by health)
+    2. RSS-Bridge (if configured)
+    3. Twitter API (if configured, emergency only)
+
+    Returns (feed, working_instance) or (None, None) if all fail.
+    A successful connection with empty entries is still returned as success.
+    """
+    # Try Nitter instances first, sorted by health
+    healthy_instances = get_healthy_instances()
+    feed, working_instance, success = await fetch_from_nitter(healthy_instances, DEFAULT_USERNAME)
+
+    if success:
+        return feed, working_instance
+
+    # If all Nitter instances failed, try RSS-Bridge
+    print(f"[!] All Nitter instances failed, trying RSS-Bridge fallback...")
+    feed, rss_bridge_success = await fetch_from_rss_bridge(DEFAULT_USERNAME)
+
+    if rss_bridge_success and feed:
+        return feed, "RSS-Bridge"
+
+    # If RSS-Bridge also failed, try Twitter API as last resort
+    if TWITTER_BEARER_TOKEN:
+        print(f"[!] RSS-Bridge failed, trying Twitter API fallback...")
+        feed, api_success = await fetch_from_twitter_api(DEFAULT_USERNAME)
+
+        if api_success and feed:
+            return feed, "Twitter-API"
+
+    # All sources failed
     return None, None
 
 
@@ -522,6 +770,16 @@ async def send_outage_alert(channel, consecutive: int, is_recovery: bool = False
         color=color
     )
     embed.add_field(name="Instances tried", value=", ".join(NITTER_INSTANCES), inline=False)
+
+    # Add health information if available
+    if HEALTH_TRACKING_ENABLED and instance_health:
+        health_summary = get_health_summary()
+        health_text = "\n".join(
+            f"• **{inst}**: {stats.get('success_rate', 'N/A')}"
+            for inst, stats in health_summary.items()
+        )
+        embed.add_field(name="Instance Health", value=health_text or "No data yet", inline=False)
+
     embed.set_footer(text="TwitterBot RSS Monitor")
     embed.timestamp = datetime.now()
 
