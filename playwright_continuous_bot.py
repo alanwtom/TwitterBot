@@ -603,10 +603,13 @@ async def poll_tweets():
                                 flip["new"]
                             )
 
-                        # Send tweet and analysis
+                        # Send tweet URL first (for auto-embed)
+                        await channel.send(tweet_url)
+
+                        # Then send analysis embed
                         embed = create_analysis_embed(analysis, tweet_url)
-                        await channel.send(content=tweet_url, embed=embed)
-                        print(f"[✓] Sent analysis for {analysis['tickers']}")
+                        await channel.send(embed=embed)
+                        print(f"[✓] Sent tweet and analysis for {analysis['tickers']}")
                         continue
                     else:
                         print(f"[–] Skipped analysis (filtered tickers: {analysis['tickers']})")
