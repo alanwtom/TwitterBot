@@ -1,0 +1,20 @@
+services:
+  - type: worker
+    name: twitter-discord-bot
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt && playwright install chromium && playwright install-deps chromium
+    startCommand: python playwright_continuous_bot.py
+    envVars:
+      - key: TWITTER_USERNAME
+        value: aleabitoreddit
+      - key: DISCORD_BOT_TOKEN
+        sync: false
+      - key: DISCORD_CHANNEL_ID
+        sync: false
+      - key: POLL_INTERVAL
+        value: 120
+    disk:
+      name: data
+      mountPath: /app/data
+      sizeGB: 1

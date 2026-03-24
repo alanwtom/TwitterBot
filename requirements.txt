@@ -1,7 +1,14 @@
-feedparser
-requests
+# Twitter/X access
+twikit>=2.3.0
+playwright>=1.40.0
+
+# AI sentiment analysis
 groq>=0.11.0
+
+# Discord bot
 discord.py>=2.3.0
+
+# Environment configuration
 python-dotenv>=1.0.0
 # Optional: Twitter API fallback (emergency use only)
 # Uncomment to enable Twitter API as fallback when Nitter fails

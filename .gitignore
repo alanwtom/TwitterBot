@@ -1,5 +1,40 @@
+# Environment variables
 .env
+.env.local
+
+# Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.pyc
+venv/
+env/
+ENV/
+
+# Data files (sensitive!)
+data/*.json
+data/*.db
+data/*.txt
+!data/.gitkeep
+
+# Test files
+test_*.py
+
+# Documentation (keep repo clean)
+*_DEPLOYMENT.md
+*_SETUP.md
+TEST_RESULTS.md
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
