@@ -1,1 +1,1 @@
-worker: python main.py
+worker: python playwright_continuous_bot.py
