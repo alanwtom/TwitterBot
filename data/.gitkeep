@@ -1,0 +1,27 @@
+# Data Directory
+
+This directory stores persistent data for the bot.
+
+## Required Files
+
+### twikit_cookies.json
+Twitter cookies for authentication. **Do not commit this file to git!**
+
+To get cookies:
+1. Log into https://x.com in your browser
+2. Install "Get cookies.txt LOCALLY" browser extension
+3. Click the extension and download cookies
+4. Save as `data/twikit_cookies.json`
+
+Format:
+```json
+[
+  {"name": "auth_token", "value": "...", "domain": ".twitter.com"},
+  {"name": "ct0", "value": "...", "domain": ".twitter.com"}
+]
+```
+
+## Generated Files
+
+- `last_tweet_id.txt` - Last processed tweet ID (auto-created)
+- `sentiment.db` - Sentiment analysis database (auto-created)
