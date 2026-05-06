@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Continuous Twitter → Discord Bot using Playwright
---------------------------------------------------
+Continuous Twitter → Discord Bot using twikit
+----------------------------------------------
 Features:
-- Reuses browser instance for efficiency
-- Auto-detects expired cookies
+- Cookie-based auth via twikit (no browser needed)
+- Auto-detects expired cookies and re-logins
 - Graceful error recovery
-- Memory-efficient page management
+- Financial sentiment analysis via Groq
 """
 
 import asyncio
@@ -15,39 +15,36 @@ import os
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from playwright.async_api import async_playwright, Browser, BrowserContext
+
+from twikit import Client as TwikitClient
 
 from dotenv import load_dotenv
 import discord
 from discord.ext import tasks
 from groq import Groq
 
-# Load environment
 load_dotenv()
 
-# Config
 TWITTER_USERNAME = os.environ.get("TWITTER_USERNAME", "aleabitoreddit")
+TWITTER_EMAIL = os.environ.get("TWITTER_EMAIL", "")
+TWITTER_PASSWORD = os.environ.get("TWITTER_PASSWORD", "")
 DISCORD_BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 DISCORD_CHANNEL_ID = int(os.environ["DISCORD_CHANNEL_ID"])
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", 120))
 
-# Data storage
 LAST_TWEET_FILE = os.environ.get("LAST_TWEET_FILE", "./data/last_tweet_id.txt")
 COOKIES_FILE = Path(os.environ.get("COOKIES_FILE", "./data/twikit_cookies.json"))
 DB_PATH = os.environ.get("DB_PATH", "./data/sentiment.db")
 
-# Sentiment analysis
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 SENTIMENT_ENABLED = os.environ.get("SENTIMENT_ENABLED", "true").lower() == "true"
 FLIP_ALERTS_ENABLED = os.environ.get("FLIP_ALERTS_ENABLED", "true").lower() == "true"
 
-# Ticker filtering
 TICKER_FILTERS = os.environ.get("TICKER_FILTERS", "").split(",") if os.environ.get("TICKER_FILTERS") else []
 
-# Global browser instance (reused across polls)
-_browser: Browser | None = None
-_context: BrowserContext | None = None
+_client: TwikitClient | None = None
+_user_id: str | None = None
 
 
 # ──────────────────────────────────────────────────────────────
@@ -55,7 +52,6 @@ _context: BrowserContext | None = None
 # ──────────────────────────────────────────────────────────────
 
 def load_last_id() -> str | None:
-    """Load the last processed tweet ID from disk."""
     try:
         with open(LAST_TWEET_FILE) as f:
             return f.read().strip() or None
@@ -64,14 +60,12 @@ def load_last_id() -> str | None:
 
 
 def save_last_id(tweet_id: str) -> None:
-    """Save the last processed tweet ID to disk."""
     Path(LAST_TWEET_FILE).parent.mkdir(parents=True, exist_ok=True)
     with open(LAST_TWEET_FILE, "w") as f:
         f.write(tweet_id)
 
 
 def to_str(value, default=""):
-    """Safely convert any value to string for SQLite. Lists become JSON strings."""
     if value is None:
         return default
     if isinstance(value, list):
@@ -80,7 +74,6 @@ def to_str(value, default=""):
 
 
 def init_db() -> None:
-    """Initialize the SQLite database for sentiment tracking."""
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
 
     conn = sqlite3.connect(DB_PATH)
@@ -112,7 +105,6 @@ def init_db() -> None:
 
 
 def save_sentiment(tweet, analysis: dict) -> None:
-    """Save sentiment analysis to the database."""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -141,7 +133,6 @@ def save_sentiment(tweet, analysis: dict) -> None:
 
 
 def get_last_sentiment(ticker: str) -> str | None:
-    """Get the most recent sentiment for a specific ticker."""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -163,7 +154,6 @@ def get_last_sentiment(ticker: str) -> str | None:
 
 
 def check_sentiment_flip(analysis: dict) -> list[dict]:
-    """Check if any tickers in the analysis have flipped sentiment."""
     if not FLIP_ALERTS_ENABLED:
         return []
 
@@ -188,7 +178,6 @@ def check_sentiment_flip(analysis: dict) -> list[dict]:
 
 
 def should_analyze(tickers: list) -> bool:
-    """Check if analysis should proceed based on ticker filters."""
     if not TICKER_FILTERS:
         return True
     detected_upper = [t.upper().lstrip("$") for t in tickers]
@@ -222,12 +211,11 @@ Return valid JSON only:
 
 
 def analyze_sentiment(tweet: dict) -> dict | None:
-    """Analyze a tweet's financial sentiment using Groq."""
     if not GROQ_API_KEY:
         print("[!] GROQ_API_KEY not set - skipping sentiment analysis")
         return None
 
-    client = Groq(api_key=GROQ_API_KEY)
+    groq_client = Groq(api_key=GROQ_API_KEY)
 
     content = tweet.get('text', '')
     author = tweet.get('author', 'Unknown')
@@ -235,7 +223,7 @@ def analyze_sentiment(tweet: dict) -> dict | None:
     prompt = SENTIMENT_PROMPT.format(author=author, content=content)
 
     try:
-        response = client.chat.completions.create(
+        response = groq_client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[
                 {"role": "system", "content": "You are a financial sentiment analyst. Always respond with valid JSON only."},
@@ -251,7 +239,6 @@ def analyze_sentiment(tweet: dict) -> dict | None:
 
 
 def create_analysis_embed(analysis: dict, tweet_url: str) -> discord.Embed:
-    """Create a Discord Embed for sentiment analysis."""
     sentiment = analysis.get("sentiment", "NEUTRAL").upper()
 
     colors = {
@@ -294,7 +281,6 @@ def create_analysis_embed(analysis: dict, tweet_url: str) -> discord.Embed:
 
 
 async def send_flip_alert(channel, ticker: str, old_sentiment: str, new_sentiment: str) -> None:
-    """Send a Discord alert when sentiment flips for a ticker."""
     colors = {
         "BUY": 0x57F287,
         "SELL": 0xED4245,
@@ -325,153 +311,93 @@ async def send_flip_alert(channel, ticker: str, old_sentiment: str, new_sentimen
 
 
 # ──────────────────────────────────────────────────────────────
-# PLAYWRIGHT BROWSER MANAGEMENT
+# TWIKIT CLIENT MANAGEMENT
 # ──────────────────────────────────────────────────────────────
 
-async def init_browser() -> BrowserContext:
-    """Initialize and return a persistent browser context with cookies."""
-    global _browser, _context
+async def init_twikit() -> bool:
+    """Initialize the twikit client. Returns True on success."""
+    global _client, _user_id
 
-    if _context is not None:
-        return _context
+    if _client is not None and _user_id is not None:
+        return True
 
-    if not COOKIES_FILE.exists():
-        raise Exception(f"Cookies file not found: {COOKIES_FILE}")
+    _client = TwikitClient('en-US')
 
-    # Load cookies
-    with open(COOKIES_FILE) as f:
-        cookies_data = json.load(f)
+    # Try loading existing cookies first
+    if COOKIES_FILE.exists():
+        try:
+            await _client.set_cookies(cookies_file=str(COOKIES_FILE))
+            user = await _client.user(username=TWITTER_USERNAME)
+            _user_id = user.id
+            print(f"[✓] Loaded cookies, user_id={_user_id}")
+            return True
+        except Exception as e:
+            print(f"[!] Cookie load failed: {e}")
+            print("[*] Attempting fresh login...")
 
-    # Convert to Playwright format
-    playwright_cookies = []
-    for cookie in cookies_data:
-        pc = {
-            "name": cookie["name"],
-            "value": cookie["value"],
-            "domain": cookie.get("domain", ".twitter.com"),
-            "path": cookie.get("path", "/"),
-            "secure": cookie.get("secure", False),
-            "httpOnly": cookie.get("httpOnly", False),
-            "sameSite": cookie.get("sameSite", "Lax").capitalize()
-        }
-        playwright_cookies.append(pc)
+    # Fresh login with credentials
+    if not TWITTER_EMAIL or not TWITTER_PASSWORD:
+        print("[!] No cookies and no TWITTER_EMAIL/TWITTER_PASSWORD set.")
+        print("[!] Set TWITTER_EMAIL and TWITTER_PASSWORD in .env, or provide a cookies file.")
+        return False
 
-    print("[*] Launching browser...")
-    playwright = await async_playwright().start()
-
-    _browser = await playwright.chromium.launch(
-        headless=True,
-        args=['--disable-dev-shm-usage', '--no-sandbox']  # Reduce memory usage
-    )
-
-    _context = await _browser.new_context(
-        user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        viewport={"width": 1920, "height": 1080}
-    )
-
-    # Add cookies
-    await _context.add_cookies(playwright_cookies)
-    print("[✓] Browser initialized with cookies")
-
-    return _context
-
-
-async def check_auth_valid(context: BrowserContext) -> bool:
-    """Check if current cookies are valid by visiting Twitter."""
     try:
-        page = await context.new_page()
-        await page.goto("https://x.com", wait_until="domcontentloaded", timeout=15000)
-
-        # Check if redirected to login (cookies expired)
-        current_url = page.url
-        await page.close()
-
-        # If we're on login page or being redirected, cookies are bad
-        if "i/flow/login" in current_url or "login" in current_url:
-            return False
-
+        await _client.login(
+            auth_info_1=TWITTER_USERNAME,
+            auth_info_2=TWITTER_EMAIL,
+            password=TWITTER_PASSWORD,
+            cookies_file=str(COOKIES_FILE)
+        )
+        user = await _client.user(username=TWITTER_USERNAME)
+        _user_id = user.id
+        print(f"[✓] Logged in and saved cookies, user_id={_user_id}")
         return True
     except Exception as e:
-        print(f"[!] Auth check error: {e}")
+        print(f"[!] Login failed: {e}")
+        _client = None
+        _user_id = None
         return False
 
 
-async def fetch_tweets_page(context: BrowserContext, username: str) -> list | None:
-    """Fetch tweets from a user's page. Returns None if auth failed."""
-    page = None
-    try:
-        page = await context.new_page()
-        url = f"https://x.com/{username}"
-        print(f"[*] Fetching {url}...")
+async def fetch_tweets_twikit(username: str) -> list[dict] | None:
+    """Fetch recent tweets via twikit. Returns list of tweet dicts or None on auth failure."""
+    global _client, _user_id
 
-        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-
-        # Check for auth failure
-        if "i/flow/login" in page.url or "login" in page.url:
-            print("[!] Auth failed - redirected to login")
-            await page.close()
-            return None
-
-        # Wait for tweets to load
-        await page.wait_for_selector('article[data-testid="tweet"]', timeout=15000)
-
-        # Extract tweets
-        tweets = await page.evaluate('''
-            () => {
-                const articles = document.querySelectorAll('article[data-testid="tweet"]');
-                return Array.from(articles).slice(0, 10).map(article => {
-                    // Try to get tweet ID from permalink
-                    const timeLink = article.querySelector('a[href*="/status/"]');
-                    const tweetId = timeLink ? timeLink.href.split('/status/')[1]?.split('?')[0] || timeLink.href.split('/status/')[1] : null;
-
-                    // Get text
-                    const textEl = article.querySelector('[data-testid="tweetText"]');
-                    const text = textEl ? textEl.innerText : '';
-
-                    // Get timestamp
-                    const timeEl = article.querySelector('time');
-                    const timestamp = timeEl ? timeEl.getAttribute('datetime') : '';
-
-                    // Get metrics
-                    const getMetric = (testId) => {
-                        const el = article.querySelector(`[data-testid="${testId}"]`);
-                        return el ? el.innerText : '0';
-                    };
-
-                    return {
-                        id: tweetId,
-                        text: text,
-                        timestamp: timestamp,
-                        likes: getMetric('like'),
-                        retweets: getMetric('retweet'),
-                        replies: getMetric('reply')
-                    };
-                }).filter(t => t.id !== null);
-            }
-        ''')
-
-        await page.close()
-
-        # Sort by timestamp (newest first)
-        tweets.sort(key=lambda x: x['timestamp'] or '', reverse=True)
-
-        return tweets
-
-    except Exception as e:
-        print(f"[!] Error fetching tweets: {e}")
-        if page:
-            await page.close()
+    if _client is None or _user_id is None:
+        print("[!] twikit client not initialized")
         return None
 
+    try:
+        tweets = await _client.get_user_tweets(_user_id, 'Tweets')
 
-async def close_browser():
-    """Close the browser instance."""
-    global _browser, _context
-    if _browser:
-        await _browser.close()
-        _browser = None
-        _context = None
-        print("[✓] Browser closed")
+        if not tweets:
+            return []
+
+        results = []
+        for tweet in tweets[:10]:
+            results.append({
+                'id': str(tweet.id),
+                'text': tweet.text,
+                'timestamp': tweet.created_at.isoformat() if tweet.created_at else '',
+                'url': f"https://twitter.com/{username}/status/{tweet.id}",
+                'author': tweet.user.screen_name if tweet.user else username,
+                'likes': str(tweet.favorite_count) if tweet.favorite_count else '0',
+                'retweets': str(tweet.retweet_count) if tweet.retweet_count else '0',
+                'replies': '0',
+            })
+
+        results.sort(key=lambda x: x['timestamp'] or '', reverse=True)
+        return results
+
+    except Exception as e:
+        error_str = str(e).lower()
+        if 'couldnot' in error_str or 'unauthorized' in error_str or '401' in error_str or 'forbidden' in error_str:
+            print(f"[!] Auth error fetching tweets: {e}")
+            _client = None
+            _user_id = None
+            return None
+        print(f"[!] Error fetching tweets: {e}")
+        return None
 
 
 # ──────────────────────────────────────────────────────────────
@@ -480,13 +406,12 @@ async def close_browser():
 
 intents = discord.Intents.default()
 intents.message_content = True
-client = discord.Client(intents=intents)
+bot = discord.Client(intents=intents)
 
 
-@client.event
+@bot.event
 async def on_ready():
-    """Called when the bot successfully connects to Discord."""
-    print(f"\nLogged in as {client.user}")
+    print(f"\nLogged in as {bot.user}")
     print(f"Monitoring: @{TWITTER_USERNAME}")
     print(f"Polling every {POLL_INTERVAL}s")
     if TICKER_FILTERS:
@@ -494,78 +419,55 @@ async def on_ready():
     print(f"Sentiment analysis: {'enabled' if SENTIMENT_ENABLED else 'disabled'}")
     print(f"Flip alerts: {'enabled' if FLIP_ALERTS_ENABLED else 'disabled'}")
 
-    # Initialize database
     init_db()
 
-    # Initialize browser
-    try:
-        context = await init_browser()
-        valid = await check_auth_valid(context)
+    ok = await init_twikit()
+    if not ok:
+        channel = bot.get_channel(DISCORD_CHANNEL_ID)
+        if channel:
+            embed = discord.Embed(
+                title="🚨 Bot Error: Twitter Auth Failed",
+                description="Could not authenticate with Twitter. Check TWITTER_EMAIL/TWITTER_PASSWORD in .env or provide a valid cookies file.",
+                color=0xED4245
+            )
+            embed.add_field(
+                name="Required",
+                value="1. Set TWITTER_EMAIL and TWITTER_PASSWORD in .env\n2. Or place valid cookies at data/twikit_cookies.json\n3. Restart the bot",
+                inline=False
+            )
+            await channel.send(embed=embed)
+        print("[!] Twitter auth failed — bot will retry on next poll cycle")
 
-        if not valid:
-            print("\n[!] Cookies are EXPIRED!")
-            print("[!] Please refresh cookies:")
-            print("    1. Log into https://x.com in your browser")
-            print("    2. Export cookies using 'Get cookies.txt LOCALLY' extension")
-            print("    3. Save to data/twikit_cookies.json")
-            print("    4. Restart the bot\n")
-            await close_browser()
-        else:
-            print("[✓] Cookies are valid\n")
-
-    except Exception as e:
-        print(f"\n[!] Browser init failed: {e}\n")
-
-    # Start polling
     poll_tweets.start()
 
 
 @tasks.loop(seconds=POLL_INTERVAL)
 async def poll_tweets():
-    """Main polling loop."""
-    channel = client.get_channel(DISCORD_CHANNEL_ID)
+    channel = bot.get_channel(DISCORD_CHANNEL_ID)
     if not channel:
         print("[!] Channel not found")
         return
 
-    # Get or create browser context
     try:
-        context = await init_browser()
+        if _client is None:
+            ok = await init_twikit()
+            if not ok:
+                print("[!] Still cannot authenticate with Twitter")
+                return
 
-        # Check auth validity
-        valid = await check_auth_valid(context)
-        if not valid:
-            print("[!] Cookies expired during polling")
-            embed = discord.Embed(
-                title="🚨 Bot Error: Cookies Expired",
-                description="Twitter cookies have expired. Please refresh them and restart the bot.",
-                color=0xED4245
-            )
-            embed.add_field(
-                name="Instructions",
-                value="1. Log into https://x.com\n2. Export cookies with browser extension\n3. Save to data/twikit_cookies.json\n4. Restart bot",
-                inline=False
-            )
-            await channel.send(embed=embed)
-            poll_tweets.stop()
-            await close_browser()
-            return
-
-        # Fetch tweets
-        tweets = await fetch_tweets_page(context, TWITTER_USERNAME)
+        tweets = await fetch_tweets_twikit(TWITTER_USERNAME)
 
         if tweets is None:
-            print(f"[–] Failed to fetch tweets ({datetime.now().strftime('%H:%M:%S')})")
+            print(f"[–] Auth failure, will retry login ({datetime.now().strftime('%H:%M:%S')})")
+            await init_twikit()
             return
 
         if not tweets:
             print(f"[–] No tweets found ({datetime.now().strftime('%H:%M:%S')})")
             return
 
-        # Load last processed ID
         last_id = load_last_id()
 
-        # Find new tweets
         new_tweets = []
         for tweet in tweets:
             if tweet['id'] == last_id:
@@ -576,16 +478,10 @@ async def poll_tweets():
             print(f"[–] No new tweets ({datetime.now().strftime('%H:%M:%S')})")
             return
 
-        # Process oldest first
         for tweet in reversed(new_tweets):
-            tweet_url = f"https://twitter.com/{TWITTER_USERNAME}/status/{tweet['id']}"
+            tweet_url = tweet['url']
             print(f"[🐦] New tweet: {tweet['text'][:50]}...")
 
-            # Add URL to tweet dict for sentiment analysis
-            tweet['url'] = tweet_url
-            tweet['author'] = TWITTER_USERNAME
-
-            # Sentiment analysis
             if SENTIMENT_ENABLED and GROQ_API_KEY:
                 analysis = analyze_sentiment(tweet)
 
@@ -593,7 +489,6 @@ async def poll_tweets():
                     if should_analyze(analysis["tickers"]):
                         save_sentiment(tweet, analysis)
 
-                        # Check for flips
                         flips = check_sentiment_flip(analysis)
                         for flip in flips:
                             await send_flip_alert(
@@ -603,10 +498,8 @@ async def poll_tweets():
                                 flip["new"]
                             )
 
-                        # Send tweet URL first (for auto-embed)
                         await channel.send(tweet_url)
 
-                        # Then send analysis embed
                         embed = create_analysis_embed(analysis, tweet_url)
                         await channel.send(embed=embed)
                         print(f"[✓] Sent tweet and analysis for {analysis['tickers']}")
@@ -614,11 +507,9 @@ async def poll_tweets():
                     else:
                         print(f"[–] Skipped analysis (filtered tickers: {analysis['tickers']})")
 
-            # Fallback: send bare tweet URL
             await channel.send(tweet_url)
             print(f"[✓] Sent: {tweet_url}")
 
-        # Save newest tweet ID
         save_last_id(new_tweets[0]['id'])
         print(f"[✓] Updated last_id to {new_tweets[0]['id']}\n")
 
@@ -630,19 +521,15 @@ async def poll_tweets():
 
 @poll_tweets.before_loop
 async def before_poll_tweets():
-    """Wait before starting first poll."""
-    await client.wait_until_ready()
+    await bot.wait_until_ready()
     await asyncio.sleep(5)
 
 
 def main():
-    """Start the Discord bot."""
     try:
-        client.run(DISCORD_BOT_TOKEN)
-    finally:
-        # Cleanup on exit
-        if _browser:
-            asyncio.run(close_browser())
+        bot.run(DISCORD_BOT_TOKEN)
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":

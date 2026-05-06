@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__web-search-prime__webSearchPrime",
+      "Bash(findstr:*)",
+      "Bash(dir:*)",
+      "Bash(python -m py_compile:*)",
+      "Bash(git -C \"C:\\\\Users\\\\alanh\\\\Documents\\\\GitHub\\\\TwitterBot\" status)",
+      "Bash(git -C \"C:\\\\Users\\\\alanh\\\\Documents\\\\GitHub\\\\TwitterBot\" diff)",
+      "Bash(git -C \"C:\\\\Users\\\\alanh\\\\Documents\\\\GitHub\\\\TwitterBot\" log --oneline -10)",
+      "Bash(git -C \"C:\\\\Users\\\\alanh\\\\Documents\\\\GitHub\\\\TwitterBot\" add Procfile runtime.txt RAILWAY_DEPLOYMENT.md .env.example CLAUDE.md main.py requirements.txt)",
+      "Bash(git -C \"C:\\\\Users\\\\alanh\\\\Documents\\\\GitHub\\\\TwitterBot\" commit -m \"$\\(cat <<''EOF''\nAdd Railway deployment and improved feed fetching with health tracking\n\n- Add Procfile and runtime.txt for Railway deployment\n- Implement Nitter instance health tracking with automatic prioritization\n- Add RSS-Bridge fallback support \\(optional secondary source\\)\n- Add Twitter API emergency fallback \\(optional, costs money\\)\n- Update .env.example with new configuration options\n- Add comprehensive Railway deployment guide\n- Update CLAUDE.md with new architecture details\n\nCo-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git -C \"C:\\\\Users\\\\alanh\\\\Documents\\\\GitHub\\\\TwitterBot\" push)",
+      "Bash(railway --version:*)",
+      "Bash(python:*)",
+      "Bash(pip install:*)",
+      "Bash(test:*)",
+      "Bash(curl:*)",
+      "Bash(iconv:*)",
+      "Bash(NITTER_USERNAME=elonmusk python test_full_pipeline.py)"
+    ]
+  }
+}
